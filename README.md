@@ -36,3 +36,5 @@ Vision: Support for models like LLaVA and Llama 3.2 Vision for native image anal
 File Attachments: Drop local text files or images directly into the chat to provide immediate context for the agent's next task.
 
 <img width="1920" height="1200" alt="agent" src="https://github.com/user-attachments/assets/f6705305-7a1a-4ceb-bd4f-3f657a860400" />
+
+![phone](https://github.com/user-attachments/assets/60831005-3afb-4c5f-a416-fabb362e07d0)
