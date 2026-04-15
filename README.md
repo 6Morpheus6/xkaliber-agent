@@ -1,4 +1,4 @@
-⚔️KALIBER AGENT // VERSION 28
+⚔️KALIBER AGENT // VERSION 18
 Autonomous Neural Link • System Harness • Robotics Control
 Xkaliber Agent is a specialized Linux desktop application built 100% inhouse by team xkaliber that transforms local AI models into fully autonomous system operators. Built on Electron and powered by Ollama, it bridges the gap between Large Language Models and physical reality—granting AI the "True Agency" to manage files, execute system commands, and actuate robotics. (be sure to check out xkaliber os) @ https://github.com/reefer42/Xkaliber-repo
 
