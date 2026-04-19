@@ -1,7 +1,45 @@
-⚔️KALIBER AGENT // VERSION 18
-Autonomous Neural Link • System Harness • Robotics Control
-Xkaliber Agent is a specialized Linux desktop application built 100% inhouse by team xkaliber that transforms local AI models into fully autonomous system operators. Built on Electron and powered by Ollama, it bridges the gap between Large Language Models and physical reality—granting AI the "True Agency" to manage files, execute system commands, and actuate robotics. (be sure to check out xkaliber os) @ https://github.com/reefer42/Xkaliber-repo
+⚔️kaliber Agent v21
+The Definitive Autonomous Desktop Client for Local Intelligence.
 
+Xkaliber Agent is a modern, dark-themed Electron interface that transforms local Ollama models into fully capable system operators. Beyond simple chat, v21 equips your neural models with persistent vector memory, secure system-level execution, real-time web scraping, and multimodal integration.
+
+🧠 Neuro-Core: Intelligent Persistent Memory
+Powered by a "Clawbot-style" long-term memory engine, the agent doesn't just chat—it learns and evolves.
+
+Dynamic VRAM Management: The agent autonomously monitors GPU resources. If VRAM is congested during a memory operation, it will suspend idle models to ensure Neuro-Core remains operational.
+
+Autonomous Learning: Using the mem_store tool, the agent intelligently decides which facts, user preferences, or project details are worth vectorizing for the long term.
+
+Offline Embeddings: Utilizes the all-minilm engine. If missing, Xkaliber Agent securely streams and auto-installs it on the first boot.
+
+Secure Vector Storage: Databases are written directly to ~/.config/xkaliber-agent/ via IPC, bypassing browser sandbox limitations for true persistence.
+
+Real-time Feedback: Monitor your agent's brain with the [X MEMS] counter and the [ NEURO-CORE SAVING... ] status indicator.
+
+🛡️ System Access & Secure Sudo
+Xkaliber Agent acts as a bridge between the LLM and your hardware.
+
+Host Execution: Run bash commands directly on your machine to manage files, install packages, or configure services.
+
+Sudo Injection: Provide your password in the secure UI field; the agent dynamically pipes it (echo | sudo -S) for root tasks without ever saving your password to logs or neural memory.
+
+🛠️ The Agentic Toolbelt
+View every action in real-time with transparent execution logs (⚡ Exec: function_name).
+
+File Ops: read, write, list, and delete files across the system.
+
+Memory: High-speed vector_search and mem_store.
+
+Netrunner: Real-time web search via a secure DuckDuckGo scraper (No API keys required).
+
+Communication: Autonomous WhatsApp messaging via QR-linked sessions.
+
+Logic: dynamic_schema_generate for creating perfectly structured JSON data.
+
+🔊 Audio & Multimodal Uplink
+Piper TTS: Crystal-clear, 100% offline Text-to-Speech (en_US-lessac-medium).
+
+Vision & Context: Drag-and-drop images for vision-model analysis or text files for instant context injection.
 everything in releases section !!!!!
 
 (THIS ONLY SUPPORTS OLLAMA)
@@ -23,8 +61,6 @@ File Operations: Read, write, delete, and navigate local directory structures.
 API Interaction: Make raw HTTP requests to interact with external REST APIs or local services.
 
 Netrunner Mode: Perform live web searches to inject real-time data into the neural stream.
-
-GPIO Control: Direct read/write access to physical pins for LEDs, relays, and triggers.
 
 Sensor Fusion: The agent can poll ultrasonic, IR, and touch sensors to make environment-aware decisions.
 
