@@ -1,6 +1,7 @@
 # Xkaliber Agent v38.4.0 // Remote File Downloads
 
 Xkaliber Agent is a modern, dark-themed autonomous agent desktop client built with Electron. It connects seamlessly to local **Ollama** and **LM Studio** neural models and equips them with system-level access, persistent vector memory, web scraping, and multimodal capabilities.
+you need only ollama and https://ollama.com/library/all-minilm
 
 ### 🚀 NEW in v38.4.0: Remote File Downloads
 - **Cloudflare-Ready Download Links**: The agent can now securely serve files directly from the host machine to any remote device via a new `provide_file_download_link` tool.
