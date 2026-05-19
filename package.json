@@ -1,7 +1,7 @@
 {
   "name": "xkaliber-agent",
-  "version": "37.9.1",
-  "description": "Xkaliber Agent - Resource-Optimized Autonomous Assistant",
+  "version": "38.3.0",
+  "description": "Xkaliber Agent - Ultra-Aggressive Task Guard v38.2. Fixes LM Studio context cutoffs.",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

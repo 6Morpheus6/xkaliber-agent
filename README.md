@@ -1,6 +1,27 @@
-# Xkaliber Agent v37.9.1 // Resource-Optimized Autonomous Assistant
+# Xkaliber Agent v38.3.0 // API Compliance & Task Isolation Fix
 
 Xkaliber Agent is a modern, dark-themed autonomous agent desktop client built with Electron. It connects seamlessly to local **Ollama** and **LM Studio** neural models and equips them with system-level access, persistent vector memory, web scraping, and multimodal capabilities.
+
+### 🚀 NEW in v38.3.0: API Compliance & Task Isolation Fix
+- **API Payload Compliance**: Enforced strict OpenAI tool response schema compliance. Fixes critical hallucination bugs (like the "loophole" hallucination) caused by backends dropping malformed tool execution results.
+- **Task Isolation Logic**: The Resource Guard now correctly searches history backwards when isolating active tasks to save VRAM. This prevents old, irrelevant prompts from becoming permanently glued to the agent's context window.
+- **Thought Tag Leak Filter**: Added real-time stream filtering to strip raw model reasoning tags (e.g., `<|channel>thought <channel|>`) before they render in the UI.
+
+### 🚀 NEW in v38.2.0: Ultra-Aggressive Loop Guard
+- **45% Generation Headroom**: The Context Guard now strictly limits prompt context to 55% of your slider size during loops, guaranteeing a massive 45% (thousands of tokens) dedicated purely to outputting huge code files.
+- **In-Flight Wipes**: Intermediate tool outputs are now continuously wiped while the agent is running multi-step tasks, keeping the payload incredibly lean without dropping the original task instruction.
+- **Auto-Recovery**: If a massive generation *does* hit the hard limit, the agent no longer crashes. It forces an emergency memory wipe and prompts the AI to try a chunked strategy.
+
+### 🚀 NEW in v38.1.0: Task-Aware Context Guard
+- **Task-Aware Pruning**: The agent now identifies your original task and formal `task_begin` plans, ensuring they are NEVER pruned even when context is tight.
+- **Automatic Resource Guard**: When system RAM or process memory is low, the agent automatically triggers "Task Isolation" mode, flushing intermediate bloat while keeping your goals intact.
+- **LM Studio Optimization**: Mathematically bound context payloads prevent "Rolling Window" thrashing and guardrail errors in LM Studio.
+
+### 🚀 NEW in v38.0.0: Ollama Reliability & Performance
+- **Ollama Stability Fixes**: Resolved issues where the agent would "hang" or "think" indefinitely when using Ollama models for complex tasks. This was caused by a missing loop continuation instruction after executing tools, which has now been fixed.
+- **Improved Streaming Parser**: The Ollama stream handler now more reliably captures tool calls and content deltas, even with high-latency or high-pressure generation.
+- **Resource Defaults**: **RESOURCE SAVER** is now toggled **OFF** by default. This ensures the model retains more conversational context for better reasoning, unless the user explicitly chooses to optimize for low VRAM.
+- **Enhanced System Directives**: Refined the core system prompt (v38) to be more authoritative with file system and system-level tasks, ensuring the model uses tools immediately without hesitation.
 
 ### 🚀 NEW in v37.9.1: Critical Core & UI Hotfixes
 - **High-Contrast Chat Bubbles**: Eliminated visual halation (faint text) by redesigning chat bubbles to feature pure black text on light backgrounds, ensuring maximum readability without sacrificing the app's dark theme.

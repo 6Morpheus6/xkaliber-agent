@@ -2,7 +2,7 @@
 set -e
 
 APP_NAME="xagent"
-VERSION="37.8.0"
+VERSION="38.0.0"
 ARCH="amd64"
 DEB_NAME="${APP_NAME}_${VERSION}_${ARCH}"
 

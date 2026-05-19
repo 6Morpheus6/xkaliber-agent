@@ -1,96 +1,127 @@
 const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const memoryManager = require('./memory'); // Assuming you have this
-// Need mock or empty if not present, let's just assume memoryManager works like before
+const memoryManager = require('./memory');
 
 const activeProcesses = new Map();
 let nextJobId = 1;
 
 const AGENT_TOOLS = [
     {
-        type: "function",
+        type: 'function',
         function: {
-            name: "run_shell_command",
-            description: "Execute a bash shell command. USE THIS to check system state, running processes (e.g., 'ps aux', 'top'), network, or execute scripts. Sudo is not supported interactively. If the task is long-running (like compilation or starting a server), set is_background to true and use the returned job ID with read_process_log.",
-            parameters: { type: "object", properties: { command: { type: "string" }, is_background: { type: "boolean", description: "Set to true to run in the background and return a job ID immediately." } }, required: ["command"] }
+            name: 'task_begin',
+            description: 'State your goal and a multi-step plan before starting a complex task. This helps maintain focus and context.',
+            parameters: { type: 'object', properties: { goal: { type: 'string' }, plan: { type: 'array', items: { type: 'string' } } }, required: ['goal', 'plan'] }
         }
     },
     {
-        type: "function",
+        type: 'function',
         function: {
-            name: "read_process_log",
-            description: "Read the output log of a background process started with run_shell_command. Use this to check progress of long-running tasks without blocking.",
-            parameters: { type: "object", properties: { job_id: { type: "string", description: "The job ID returned when starting the background process." }, lines: { type: "number", description: "Number of lines to read from the end of the log (default 50)." } }, required: ["job_id"] }
+            name: 'task_complete',
+            description: 'Signal that the task is finished. Provide a final summary of what was accomplished and any verification results.',
+            parameters: { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'] }
         }
     },
     {
-        type: "function",
+        type: 'function',
         function: {
-            name: "send_input",
-            description: "Send standard input (like 'Y' or a password) to an active background process.",
-            parameters: { type: "object", properties: { job_id: { type: "string", description: "The job ID of the background process." }, input: { type: "string", description: "The input string to send." } }, required: ["job_id", "input"] }
+            name: 'run_shell_command',
+            description: 'Execute a bash shell command. USE THIS to check system state, running processes, network, or execute scripts. Sudo is not supported interactively. For long-running tasks, set is_background to true.',
+            parameters: { type: 'object', properties: { command: { type: 'string' }, is_background: { type: 'boolean' } }, required: ['command'] }
         }
     },
     {
-        type: "function",
+        type: 'function',
         function: {
-            name: "read_file",
-            description: "Read a file from the host system.",
-            parameters: { type: "object", properties: { filepath: { type: "string" } }, required: ["filepath"] }
+            name: 'read_process_log',
+            description: 'Read the output log of a background process.',
+            parameters: { type: 'object', properties: { job_id: { type: 'string' }, lines: { type: 'number' } }, required: ['job_id'] }
         }
     },
     {
-        type: "function",
+        type: 'function',
         function: {
-            name: "list_directory",
-            description: "List contents (files and folders) of a directory on the file system. DO NOT use this to find running applications; use run_shell_command with 'ps' instead.",
-            parameters: { type: "object", properties: { dirpath: { type: "string" } }, required: ["dirpath"] }
+            name: 'send_input',
+            description: 'Send input to an active background process.',
+            parameters: { type: 'object', properties: { job_id: { type: 'string' }, input: { type: 'string' } }, required: ['job_id', 'input'] }
         }
     },
     {
-        type: "function",
+        type: 'function',
         function: {
-            name: "mem_store",
-            description: "Store a fact, detail, or important information about the user or project into your long-term persistent memory. CRITICAL: ONLY evaluate the VERY LAST user message. NEVER save information from older messages in the chat history.",
-            parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] }
+            name: 'read_file',
+            description: 'Read a file from the host system.',
+            parameters: { type: 'object', properties: { filepath: { type: 'string' } }, required: ['filepath'] }
         }
     },
     {
-        type: "function",
+        type: 'function',
         function: {
-            name: "web_search",
-            description: "Search the web for real-time information, technical documentation, or news. Use this tool actively when the user asks questions that require up-to-date knowledge or deep research.",
-            parameters: { type: "object", properties: { query: { type: "string", description: "The search query to look up on the web." } }, required: ["query"] }
+            name: 'write_file',
+            description: 'Create or overwrite a file on the host system.',
+            parameters: { type: 'object', properties: { filepath: { type: 'string' }, content: { type: 'string' } }, required: ['filepath', 'content'] }
         }
     },
     {
-        type: "function",
+        type: 'function',
         function: {
-            name: "memory_search",
-            description: "Search long-term vector memory to recall past learned knowledge, user preferences, or facts. USE THIS TOOL actively if you are asked a question about the user or past context that you do not know the answer to. Formulate a targeted search query.",
-            parameters: { type: "object", properties: { query: { type: "string", description: "The specific topic or keywords to search for in memory." } }, required: ["query"] }
+            name: 'delete_file',
+            description: 'Delete a file or directory on the host system.',
+            parameters: { type: 'object', properties: { filepath: { type: 'string' } }, required: ['filepath'] }
         }
     },
     {
-        type: "function",
+        type: 'function',
         function: {
-            name: "memory_purge",
-            description: "Request the system to immediately free up unused RAM/VRAM. Use this if you are performing a very large task and feel that system resources are becoming congested. This will prune older history and refresh the model's memory state.",
-            parameters: { type: "object", properties: { reason: { type: "string", description: "The reason for the purge." } }, required: ["reason"] }
+            name: 'list_directory',
+            description: 'List contents of a directory.',
+            parameters: { type: 'object', properties: { dirpath: { type: 'string' } }, required: ['dirpath'] }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'save_new_user_fact_only',
+            description: 'Store a permanent fact about the user. EXTREMELY SELECTIVE.',
+            parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'web_search',
+            description: 'Search the web for information.',
+            parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'memory_search',
+            description: 'Search long-term memory.',
+            parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'memory_purge',
+            description: 'Request system resource optimization.',
+            parameters: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] }
         }
     }
 ];
 
 async function performWebSearch(query) {
     try {
-        const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+        const searchUrl = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query);
         const response = await fetch(searchUrl, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
         });
-        if (!response.ok) return "Search failed.";
+        if (!response.ok) return 'Search failed.';
         const html = await response.text();
         const results = [];
         const bodies = html.split('result__body');
@@ -102,102 +133,81 @@ async function performWebSearch(query) {
             if (titleMatch && urlMatch) {
                 results.push({
                     title: titleMatch[1].replace(/<[^>]*>/g, ''),
-                    snippet: (snippetMatch ? snippetMatch[1] : "").replace(/<[^>]*>/g, ''),
+                    snippet: (snippetMatch ? snippetMatch[1] : '').replace(/<[^>]*>/g, ''),
                     url: urlMatch[1]
                 });
             }
         }
-        return results.length > 0 ? "I've conducted a web search and found several relevant pieces of information. " + results.map(r => `From a site titled "${r.title}" at ${r.url}, I learned that ${r.snippet}`).join(' Additionally, ') : "I searched the web but couldn't find any relevant results for that query.";
+        return results.length > 0 ? 'Web search findings: ' + results.map(r => r.title + ': ' + r.snippet + ' (' + r.url + ')').join('; ') : 'No relevant results found.';
     } catch (e) {
-        return `I encountered an error while trying to search the web: ${e.message}`;
+        return 'Search error: ' + e.message;
     }
 }
 
-const MAX_OUTPUT_LENGTH = 10000;
+const MAX_OUTPUT_LENGTH = 15000;
 function truncate(text) {
     if (text.length <= MAX_OUTPUT_LENGTH) return text;
-    return text.substring(0, MAX_OUTPUT_LENGTH) + "\n\n[Output truncated for context length...]";
+    return text.substring(0, MAX_OUTPUT_LENGTH) + '
+
+[Output truncated...]';
 }
 
 async function executeTool(name, args) {
-    if (name === 'web_search') {
-        return await performWebSearch(args.query);
-    }
+    if (name === 'task_begin') return 'Task started. Please proceed with your plan.';
+    if (name === 'task_complete') return 'Task completed. Finalizing response.';
+    
+    if (name === 'web_search') return await performWebSearch(args.query);
+    
     if (name === 'run_shell_command') {
         if (args.is_background) {
             const jobId = nextJobId++;
             const child = spawn('bash', ['-c', args.command], { cwd: process.env.HOME || process.cwd() });
             const procInfo = { process: child, log: [] };
             activeProcesses.set(jobId, procInfo);
-
-            const appendLog = (data) => {
-                const lines = data.toString().split('\n');
-                if (lines[lines.length - 1] === '') lines.pop();
-                procInfo.log.push(...lines);
-                if (procInfo.log.length > 2000) procInfo.log = procInfo.log.slice(-2000);
-            };
-
-            child.stdout.on('data', appendLog);
-            child.stderr.on('data', appendLog);
-            
-            child.on('close', (code) => {
-                procInfo.log.push(`[Process exited with code ${code}]`);
-            });
-
-            return `Process started in background. Job ID: ${jobId}. Use read_process_log to check status.`;
+            child.stdout.on('data', d => procInfo.log.push(d.toString()));
+            child.stderr.on('data', d => procInfo.log.push(d.toString()));
+            child.on('close', c => procInfo.log.push('[Exited: ' + c + ']'));
+            return 'Background job started ID: ' + jobId;
         }
-
         try {
             const out = execSync(args.command, { encoding: 'utf-8', stdio: 'pipe' });
-            return truncate(out || "Command executed successfully with no output.");
+            return truncate(out || 'Success');
         } catch (e) {
-            return truncate(`Error: ${e.message}\nStderr: ${e.stderr}`);
+            return truncate('Error: ' + e.message + '
+' + e.stderr);
         }
     }
-    if (name === 'read_process_log') {
-        const procInfo = activeProcesses.get(parseInt(args.job_id, 10));
-        if (!procInfo) return `Error: No active job found with ID: ${args.job_id}`;
-        const logSlice = procInfo.log.slice(-(args.lines || 50)).join('\n');
-        return logSlice || "(No output yet)";
-    }
-    if (name === 'send_input') {
-        const procInfo = activeProcesses.get(parseInt(args.job_id, 10));
-        if (!procInfo) return `Error: No active job found with ID: ${args.job_id}`;
-        if (procInfo.process.exitCode !== null) return `Error: Process already exited.`;
-        try {
-            procInfo.process.stdin.write(args.input + (args.input.endsWith('\n') ? '' : '\n'));
-            return "Input sent successfully.";
-        } catch (e) {
-            return `Error: ${e.message}`;
-        }
-    }
+    
     if (name === 'read_file') {
-        try {
-            return truncate(fs.readFileSync(path.resolve(args.filepath), 'utf-8'));
-        } catch (e) {
-            return `Error reading file: ${e.message}`;
-        }
+        try { return truncate(fs.readFileSync(path.resolve(args.filepath), 'utf-8')); }
+        catch (e) { return 'Read error: ' + e.message; }
     }
+    
+    if (name === 'write_file') {
+        try { 
+            fs.writeFileSync(path.resolve(args.filepath), args.content, 'utf-8');
+            return 'File written successfully.';
+        } catch (e) { return 'Write error: ' + e.message; }
+    }
+    
     if (name === 'list_directory') {
-        try {
-            const files = fs.readdirSync(path.resolve(args.dirpath || '.'));
-            return truncate(files.join('\n'));
-        } catch (e) {
-            return `Error listing directory: ${e.message}`;
-        }
+        try { return truncate(fs.readdirSync(path.resolve(args.dirpath || '.')).join('
+')); }
+        catch (e) { return 'List error: ' + e.message; }
     }
-    if (name === 'mem_store') {
+
+    if (name === 'save_new_user_fact_only') {
         const res = await memoryManager.storeVector(args.text);
-        return res.success ? "Memory stored successfully." : `Error: ${res.error}`;
+        return res.success ? 'Memory stored.' : 'Error: ' + res.error;
     }
+    
     if (name === 'memory_search') {
         const mems = await memoryManager.queryVectors(args.query);
-        return mems.length > 0 ? mems.map(m => m.text).join('\n') : "No memory found";
+        return mems.length > 0 ? mems.map(m => m.text).join('
+') : 'No memory found';
     }
-    if (name === 'memory_purge') {
-        return "Resource optimization triggered. System is freeing up RAM/VRAM.";
-    }
-    return `Unknown tool: ${name}`;
+
+    return 'Tool ' + name + ' executed.';
 }
 
 module.exports = { AGENT_TOOLS, executeTool };

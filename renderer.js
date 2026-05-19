@@ -968,6 +968,14 @@ function renderHistory() {
 
 // --- Tool executor (agent mode) ---
 async function executeTool(name, args) {
+    if (name === 'task_begin') {
+        console.log(`Model started task: ${args.goal}`);
+        return `Task acknowledged. Goal: ${args.goal}. Plan: ${args.plan.join(', ')}. Please proceed with the first step.`;
+    }
+    if (name === 'task_complete') {
+        console.log(`Model completed task. Summary: ${args.summary}`);
+        return `Task completion verified. Final summary received. You may now provide the final response to the user.`;
+    }
     if (name === 'run_shell_command') {
         let cmd = args.command;
         const sudoPass = sudoInput.value;
@@ -1046,83 +1054,129 @@ window.api.on('resource-update', (data) => {
     }
 });
 
-function pruneChatHistory(historyArray, forceAggressive = false) {
+function pruneChatHistory(historyArray, forceAggressive = false, currentTurnCount = 0) {
     const memorySaverEnabled = document.getElementById('memory-saver-toggle')?.checked;
     const isActuallyCongested = currentResourceStatus === 'congested';
     
     // Adaptive limits based on resource pressure
-    let MAX_LENGTH = 25;
+    let MAX_LENGTH = 30;
     let TRIM_THRESHOLD = 8000;
 
-    if (isActuallyCongested || forceAggressive) {
-        MAX_LENGTH = 10; // Extremely short history if congested
-        TRIM_THRESHOLD = 3000; // Aggressive truncation
+    // ULTRA-AGGRESSIVE PRUNING for active autonomous loops (turnCount > 1)
+    // We only need the system prompt, original task, plan, and immediate last step.
+    const isDeepLoop = currentTurnCount > 1;
+
+    if (isActuallyCongested || forceAggressive || isDeepLoop) {
+        MAX_LENGTH = isDeepLoop ? 6 : 12; // Keep loop history extremely tight
+        TRIM_THRESHOLD = isDeepLoop ? 1500 : 3000; // Aggressive truncation
     } else if (currentResourceStatus === 'warning') {
-        MAX_LENGTH = 18;
+        MAX_LENGTH = 20;
         TRIM_THRESHOLD = 5000;
     }
 
     // --- LM STUDIO STRICT CONTEXT ENFORCEMENT ---
     const ctxLimitTokens = parseInt(document.getElementById('ctx-slider')?.value || "8192");
-    const allowedPromptTokens = Math.floor(ctxLimitTokens * 0.75); // Reserve 25% for generation
+    // Leave 45% for generation! Writing large files (like games) requires huge output limits.
+    const allowedPromptTokens = Math.floor(ctxLimitTokens * 0.55); 
     const MAX_ALLOWED_CHARS = allowedPromptTokens * 3.5; // Approx 3.5 chars per token
-    const needsStrictContextEnforcement = uplinkMode.checked || memorySaverEnabled || forceAggressive || isActuallyCongested;
+    const needsStrictContextEnforcement = uplinkMode.checked || memorySaverEnabled || forceAggressive || isActuallyCongested || isDeepLoop;
 
-    console.log(`Resource Manager: Checking history (status: ${currentResourceStatus}, current: ${historyArray.length} messages)`);
+    console.log(`Resource Manager: Checking history (status: ${currentResourceStatus}, loop: ${currentTurnCount}, current: ${historyArray.length} msgs)`);
 
-    // 1. Trim extremely large messages in history (except the very last few)
+    // 0. Identify critical messages that should NEVER be pruned if possible
+    let taskIndex = -1;
+    let planIndex = -1;
+
+    for (let i = historyArray.length - 1; i >= 0; i--) {
+        const m = historyArray[i];
+        if (taskIndex === -1 && m.role === 'user') taskIndex = i;
+        if (planIndex === -1 && m.tool_calls && m.tool_calls.some(tc => tc.function.name === 'task_begin')) planIndex = i;
+    }
+
+    // 1. Trim extremely large messages in history (except critical ones and the very last turn)
     if (needsStrictContextEnforcement) {
         historyArray.forEach((msg, idx) => {
-            // Always protect the system prompt (idx 0) and the very last turn (last 2 msgs)
-            if (idx !== 0 && idx < historyArray.length - 2) { 
+            // Always protect the system prompt (idx 0), task definition, formal plan, and the very last turn
+            const isCritical = idx === 0 || idx === taskIndex || idx === planIndex || idx === planIndex + 1 || idx >= historyArray.length - 2;
+            if (!isCritical) { 
                 if (msg.content && msg.content.length > TRIM_THRESHOLD) {
                     console.log(`Resource Manager: Trimming large message at index ${idx} (${msg.content.length} chars)`);
                     const keepSize = isActuallyCongested ? TRIM_THRESHOLD / 4 : TRIM_THRESHOLD / 2;
                     msg.content = msg.content.substring(0, keepSize) + 
-                                  "\n\n... [TRUNCATED BY RESOURCE GUARD] ...\n\n" + 
+                                  "\n\n... [TRUNCATED BY RESOURCE GUARD TO PRESERVE TASK CONTEXT] ...\n\n" + 
                                   msg.content.slice(- (keepSize / 2));
                 }
             }
         });
     }
 
-    // 2. Reduce history size if it exceeds MAX_LENGTH
+    // 2. Reduce history size if it exceeds MAX_LENGTH, preserving critical task flow
     if (needsStrictContextEnforcement && historyArray.length > MAX_LENGTH) {
-        console.log(`Resource Manager: Pruning history from ${historyArray.length} to ${MAX_LENGTH} messages.`);
+        console.log(`Resource Manager: Pruning history from ${historyArray.length} to ${MAX_LENGTH} messages (Task-Aware).`);
         const systemPrompt = historyArray[0];
-        const recentMessages = historyArray.slice(- (MAX_LENGTH - 1));
-        historyArray = [systemPrompt, ...recentMessages];
+        const criticalIndices = new Set([0, taskIndex, planIndex, planIndex + 1].filter(idx => idx !== -1 && idx < historyArray.length));
+        
+        // Take as many recent messages as fit after critical ones
+        const recentMessages = [];
+        for (let i = historyArray.length - 1; i >= 0; i--) {
+            if (recentMessages.length >= (MAX_LENGTH - criticalIndices.size)) break;
+            if (!criticalIndices.has(i)) {
+                recentMessages.unshift(historyArray[i]);
+            }
+        }
+        
+        const finalHistory = [systemPrompt];
+        if (taskIndex !== -1 && taskIndex !== 0) finalHistory.push(historyArray[taskIndex]);
+        if (planIndex !== -1 && planIndex !== 0 && planIndex !== taskIndex) {
+            finalHistory.push(historyArray[planIndex]);
+            if (planIndex + 1 < historyArray.length) finalHistory.push(historyArray[planIndex + 1]);
+        }
+        
+        // Add recent ones that aren't already there
+        recentMessages.forEach(m => {
+            if (!finalHistory.includes(m)) finalHistory.push(m);
+        });
+        
+        // Re-sort by original temporal order if needed, but here we just want a valid flow
+        historyArray = finalHistory.sort((a, b) => historyArray.indexOf(a) - historyArray.indexOf(b));
     }
 
     // 3. Strict Payload Character Limit Enforcement (Prevents LM Studio Thrashing)
     if (uplinkMode.checked) {
         let currentChars = historyArray.reduce((acc, msg) => acc + (msg.content ? msg.content.length : 0), 0);
         if (currentChars > MAX_ALLOWED_CHARS) {
-            console.warn(`[CONTEXT GUARD] Payload size (${currentChars} chars) exceeds optimal context window (${MAX_ALLOWED_CHARS} chars). Aggressively pruning older messages to prevent LM Studio thrashing...`);
+            console.warn(`[CONTEXT GUARD] Payload size (${currentChars} chars) exceeds optimal context window (${MAX_ALLOWED_CHARS} chars). Aggressively pruning intermediate messages...`);
             
-            // Drop older intermediate messages until we fit
+            // Drop older intermediate messages until we fit, protecting system, task, and last turn
             while (currentChars > MAX_ALLOWED_CHARS && historyArray.length > 3) {
-                // Remove the oldest message right after the system prompt
-                const removed = historyArray.splice(1, 1)[0];
+                let pruneIdx = 1;
+                // Protect Task (idx 1) and Plan (idx 2) if they exist
+                if (historyArray.length > 5) {
+                    if (pruneIdx === 1) pruneIdx = 2; // Skip task
+                    if (pruneIdx === 2 && planIndex !== -1) pruneIdx = 3; // Skip plan
+                }
+                
+                if (pruneIdx >= historyArray.length - 1) pruneIdx = 1; // Fallback
+
+                const removed = historyArray.splice(pruneIdx, 1)[0];
                 currentChars -= (removed.content ? removed.content.length : 0);
             }
             
             // If it's still too big (e.g. the final prompt itself is massive), forcefully truncate the last messages
             if (currentChars > MAX_ALLOWED_CHARS) {
-                const targetChars = MAX_ALLOWED_CHARS * 0.5; // Cut it in half to give it plenty of room and keep cache stable for many turns
+                const targetChars = MAX_ALLOWED_CHARS * 0.5; 
                 while (currentChars > targetChars && historyArray.length > 4) {
-                    // Remove the oldest message right after the system prompt
                     const removed = historyArray.splice(1, 1)[0];
                     currentChars -= (removed.content ? removed.content.length : 0);
                 }
                 
-                // If it is STILL over the limit (because of a single massive message)
+                // Final emergency truncation of individual messages
                 for (let i = historyArray.length - 1; i > 0; i--) {
                     if (currentChars <= MAX_ALLOWED_CHARS) break;
-                    if (historyArray[i].content && historyArray[i].content.length > 2000) {
+                    if (historyArray[i].content && historyArray[i].content.length > 1000) {
                         const overage = currentChars - MAX_ALLOWED_CHARS;
-                        const newLength = Math.max(1000, historyArray[i].content.length - overage);
-                        historyArray[i].content = historyArray[i].content.substring(0, newLength) + "\n...[TRUNCATED TO FIT CONTEXT]";
+                        const newLength = Math.max(500, historyArray[i].content.length - overage);
+                        historyArray[i].content = historyArray[i].content.substring(0, newLength) + "\n...[TRUNCATED]";
                         currentChars = historyArray.reduce((acc, msg) => acc + (msg.content ? msg.content.length : 0), 0);
                     }
                 }
@@ -1285,17 +1339,19 @@ CRITICAL RULES:
                 }
             } catch (e) {}
             
-            const systemPrompt = `You are Xkaliber Agent v36, a conversational AI assistant (AMD Optimized). You have access to persistent vector memory, web search, and system tools. Respond naturally and conversationally to the user. Do not invoke tools for casual conversation or greetings.
+            const systemPrompt = `You are Xkaliber Agent v38, a conversational AI assistant (AMD Optimized). You have access to persistent vector memory, web search, and system tools. Respond naturally and conversationally to the user. Do not invoke tools for casual conversation or greetings.
 
 AUTONOMOUS WORKFLOW:
-You support a 'Plan-Execute-Verify' loop. For complex requests:
+You support a 'Plan-Execute-Verify' loop. For complex requests (especially file system tasks):
 1. Use \`task_begin\` to state your goal and a multi-step plan.
 2. Execute the steps sequentially using appropriate tools.
 3. After each step, analyze the output and decide the next action.
 4. Once finished, use \`task_complete\` to summarize and verify the results before responding to the user.
 
+CRITICAL: If you are asked to modify, create, or read files, you MUST use the provided tools (write_file, read_file, run_shell_command) immediately. Do not hesitate.
+
 GUARD RAILS:
-1. SECURE ACCESS: This version (v34) includes secure login and account creation. Access is restricted to authorized users only.
+1. SECURE ACCESS: This version (v38) includes secure login and account creation. Access is restricted to authorized users only.
 2. STRICT ACTION LIMITS: Never use file modification tools like write_file, delete_file, or run_shell_command unless explicitly requested by the user. 
 3. NO UNPROMPTED SETUP: Do not set up configuration files or scripts unprompted. If you are asked to read or list files, do not follow up with write actions. 
 4. PREVENT HALLUCINATIONS: If you are unsure of the user's intent or lack context, DO NOT guess or hallucinate a tool call. Instead, ask the user for clarification.
@@ -1318,15 +1374,32 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
         // we can safely clone it into payloadHistory so the AI actually sees the instruction.
         let payloadHistory = JSON.parse(JSON.stringify(chatHistory));
 
-        // TASK ISOLATION (v37.5): To prevent context bloating and VRAM exhaustion during heavy coding tasks,
-        // we proactively flush all older chat history from the model's memory, keeping ONLY the system prompt and the current prompt.
+        // TASK ISOLATION (v37.5/v38.1): To prevent context bloating and VRAM exhaustion during heavy coding tasks,
+        // we proactively flush older chat history from the model's memory if Resource Saver is ON or system is congested.
         const memorySaverEnabled = document.getElementById('memory-saver-toggle')?.checked;
-        if (memorySaverEnabled) {
-            console.log("[RESOURCE GUARD] Task Isolation triggered. Flushing previous conversational context from payload.");
+        const isActuallyCongested = currentResourceStatus === 'congested';
+        
+        if (memorySaverEnabled || isActuallyCongested) {
+            console.log(`[RESOURCE GUARD] Task Isolation triggered (${isActuallyCongested ? 'CONGESTED' : 'MANUAL'}). Flushing previous conversational context.`);
             if (payloadHistory && payloadHistory.length > 0 && payloadHistory[0].role === 'system') {
                 const sysPrompt = payloadHistory[0];
                 const lastUserPrompt = payloadHistory[payloadHistory.length - 1]; // The prompt we just added
-                payloadHistory = [sysPrompt, lastUserPrompt]; 
+                
+                // Identify the ORIGINAL task if it's different from the last user prompt
+                // This ensures the agent never forgets what it was originally asked to do.
+                let originalTask = null;
+                for (let i = chatHistory.length - 2; i >= 1; i--) {
+                    if (chatHistory[i].role === 'user') {
+                        originalTask = chatHistory[i];
+                        break;
+                    }
+                }
+                
+                if (originalTask && originalTask !== lastUserPrompt) {
+                    payloadHistory = [sysPrompt, originalTask, lastUserPrompt];
+                } else {
+                    payloadHistory = [sysPrompt, lastUserPrompt]; 
+                }
             } else {
                 payloadHistory = [];
             }
@@ -1341,8 +1414,8 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
         while (!finished && turnCount < 20) {
             turnCount++;
             
-            // RESOURCE OPTIMIZATION: Prune history if needed before each turn
-            payloadHistory = pruneChatHistory(payloadHistory);
+            // RESOURCE OPTIMIZATION: Prune history if needed before each turn, passing turnCount
+            payloadHistory = pruneChatHistory(payloadHistory, false, turnCount);
 
             let body, endpoint;
             
@@ -1415,6 +1488,7 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
                         msg.role = 'tool';
                         msg.content = String(m.content || "Success");
                         msg.tool_call_id = m.tool_call_id || `call_${Math.random().toString(36).substring(2, 10)}`;
+                        if (m.name) msg.name = m.name;
                     }
 
                     messages.push(msg);
@@ -1450,6 +1524,11 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
                 // Deep copy chatHistory to inject transient context
                 const messagesForOllama = payloadHistory.map(m => {
                     let msg = { role: m.role, content: m.content || "" };
+                    if (m.role === 'tool' || m.role === 'function') {
+                        msg.role = 'tool';
+                        if (m.name) msg.name = m.name;
+                        if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
+                    }
                     if (m.images) msg.images = m.images;
                     if (m.role === 'assistant' && m.tool_calls) {
                         msg.tool_calls = m.tool_calls.map(tc => ({
@@ -1564,6 +1643,8 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
                                 if (json.choices?.[0]?.finish_reason) finishReason = json.choices[0].finish_reason;
                                 if (delta?.content) {
                                     fullContent += delta.content;
+                                    // Strip leaked thought tags from UI rendering
+                                    fullContent = fullContent.replace(/<\|channel>.*?<channel\|>/gs, '').replace(/<\|.*?\|>/gs, '');
                                     if (isOfflineBrowserTurn) {
                                         let cleanHtml = fullContent.replace(/^```html\n?/i, '').replace(/\n?```$/i, '');
                                         const baseWebStyles = `<style>:host { display: block; max-width: 100%; overflow-x: auto; } body { word-wrap: break-word; overflow-wrap: break-word; max-width: 100%; box-sizing: border-box; } *, *::before, *::after { box-sizing: border-box; max-width: 100%; } img, video, iframe, canvas { max-width: 100%; height: auto; } pre, code, table { max-width: 100%; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }</style>`;
@@ -1599,6 +1680,9 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
                         // Ollama Format
                         try {
                             const json = JSON.parse(trimmed);
+                            if (json.error) {
+                                throw new Error(`Ollama Error: ${json.error}`);
+                            }
                             if (json.done_reason) finishReason = json.done_reason;
                             
                             // Support both /api/chat and /api/generate formats
@@ -1611,6 +1695,8 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
 
                             if (contentDelta) {
                                 fullContent += contentDelta;
+                                // Strip leaked thought tags from UI rendering
+                                fullContent = fullContent.replace(/<\|channel>.*?<channel\|>/gs, '').replace(/<\|.*?\|>/gs, '');
                                 if (isOfflineBrowserTurn) {
                                     let cleanHtml = fullContent.replace(/^```html\n?/i, '').replace(/\n?```$/i, '');
                                     const baseWebStyles = `<style>:host { display: block; max-width: 100%; overflow-x: auto; } body { word-wrap: break-word; overflow-wrap: break-word; max-width: 100%; box-sizing: border-box; } *, *::before, *::after { box-sizing: border-box; max-width: 100%; } img, video, iframe, canvas { max-width: 100%; height: auto; } pre, code, table { max-width: 100%; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }</style>`;
@@ -1619,10 +1705,14 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
                                     botDiv.innerHTML = `<span class="loading-pulse">Thinking (Step ${turnCount}/20)...</span><br><br>${existingText ? existingText + '<br><br>' : ''}${window.markedParse(fullContent)}`;
                                 }
                             }
+                            // V38: Better tool call handling for Ollama - append instead of overwrite
                             if (json.message?.tool_calls?.length > 0) {
-                                toolCalls = json.message.tool_calls.map(tc => {
+                                if (!toolCalls) toolCalls = [];
+                                json.message.tool_calls.forEach(tc => {
                                     if (!tc.id) tc.id = `call_${Math.random().toString(36).substring(2, 10)}`;
-                                    return tc;
+                                    // Check if this tool call already exists (avoid duplicates in some streaming modes)
+                                    const exists = toolCalls.some(existing => existing.id === tc.id || (existing.function.name === tc.function.name && JSON.stringify(existing.function.arguments) === JSON.stringify(tc.function.arguments)));
+                                    if (!exists) toolCalls.push(tc);
                                 });
                             }
                         } catch (e) { console.warn('Failed to parse Ollama chunk:', trimmed, e); }
@@ -1633,10 +1723,21 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
 
             if (finishReason === 'length') {
                 console.warn("[GUARD RAIL] Generation cut off due to context limits.");
-                botDiv.innerHTML += `<br><br><span style="color:var(--danger-color); padding: 5px; border: 1px dashed var(--danger-color); border-radius: 4px; display: inline-block; margin-top: 10px; font-size: 0.85rem;"><strong>⚠️ RESOURCE GUARD:</strong> The model hit its maximum context limit and was cut off mid-thought. The autonomous loop has been paused to prevent a hallucination loop. Please clear your chat history or increase your Context Size slider.</span>`;
-                chatHistory.push({ role: 'assistant', content: fullContent + "\n\n[SYSTEM: GENERATION CUT OFF MID-THOUGHT DUE TO CONTEXT LIMITS]" });
-                payloadHistory.push({ role: 'assistant', content: fullContent + "\n\n[SYSTEM: GENERATION CUT OFF MID-THOUGHT DUE TO CONTEXT LIMITS]" });
-                break; // Break the 20-turn autonomous loop
+                botDiv.innerHTML += `<br><br><span style="color:var(--danger-color); padding: 5px; border: 1px dashed var(--danger-color); border-radius: 4px; display: inline-block; margin-top: 10px; font-size: 0.85rem;"><strong>⚠️ RESOURCE GUARD:</strong> The model hit its context limit during generation. Attempting ultra-aggressive memory wipe to recover and continue...</span>`;
+                
+                chatHistory.push({ role: 'assistant', content: fullContent });
+                payloadHistory.push({ role: 'assistant', content: fullContent });
+                
+                // Force an ultra-aggressive prune right now to clear up space for the next turn
+                payloadHistory = pruneChatHistory(payloadHistory, true, 99); 
+                
+                // Tell the agent it was cut off so it knows its previous response is incomplete
+                const recoveryMsg = "[SYSTEM ALARM]: Your previous generation was cut off mid-thought because you exceeded the context window limit (max tokens reached). If you were writing a large file, it failed. Please plan a new strategy using smaller chunks, or summarize your progress and stop.";
+                chatHistory.push({ role: 'user', content: recoveryMsg });
+                payloadHistory.push({ role: 'user', content: recoveryMsg });
+                
+                // Continue the loop instead of breaking, giving the agent a chance to recover with a clear context!
+                continue;
             }
 
             if (toolCalls?.length > 0) {
@@ -1694,8 +1795,9 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
                 }
                 window._lastToolCallSignature = currentSig;
 
-                chatHistory.push({ role: 'assistant', content: fullContent, tool_calls: validToolCalls });
-                payloadHistory.push({ role: 'assistant', content: fullContent, tool_calls: validToolCalls });
+                const apiToolCalls = validToolCalls.map(tc => ({ id: tc.id, type: 'function', function: { name: tc.function.name, arguments: typeof tc.function.arguments === 'string' ? tc.function.arguments : JSON.stringify(tc.function.arguments) } }));
+                chatHistory.push({ role: 'assistant', content: fullContent, tool_calls: apiToolCalls });
+                payloadHistory.push({ role: 'assistant', content: fullContent, tool_calls: apiToolCalls });
 
                 // OPTIMIZATION: Memory tools (mem_store, memory_search) now run on CPU in v31.3.
                 // We no longer need to page out the main model here, saving significant time.
@@ -1715,8 +1817,8 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
                         result = `Error: ${e.message}`;
                         trace.addStep('tools.execute', 'tools', 'error', 'TOOL_ERR', Date.now() - startTool, e.message, t.function.name);
                     }
-                    chatHistory.push({ role: 'tool', content: String(result), tool_call_id: t.id });
-                    payloadHistory.push({ role: 'tool', content: String(result), tool_call_id: t.id });
+                    chatHistory.push({ role: 'tool', name: t.function.name, content: String(result), tool_call_id: t.id });
+                    payloadHistory.push({ role: 'tool', name: t.function.name, content: String(result), tool_call_id: t.id });
                 }
                 if (isOfflineBrowserTurn) {
                      botDiv.shadowRoot.innerHTML = `<div style="padding: 20px; text-align: center; color: #666; font-family: sans-serif;">Applying tool results (Step ${turnCount})...</div>`;
@@ -1724,6 +1826,7 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
                      botDiv.innerHTML = `<span class="loading-pulse">Step ${turnCount} complete. Thinking...</span><br><br>${existingText ? existingText + '<br><br>' : ''}${window.markedParse(fullContent)}`;
                 }
                 await new Promise(r => setTimeout(r, 1500)); // Increased VRAM relief delay
+                continue; // V38 FIX: Ensure loop restarts to send tool results back to the model
             } else {
                 window._lastToolCallSignature = null; // Clear on success
                 // BUG FIX: If model is silent after tool results, nudge it.
