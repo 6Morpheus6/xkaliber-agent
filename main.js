@@ -294,7 +294,7 @@ ipcMain.handle('auth-has-users', async () => {
     return { hasUsers: authManager.hasUsers() };
 });
 
-const historyFile = path.join(userDataPath, 'xkaliber_agent_session_v38_3.json');
+const historyFile = path.join(userDataPath, 'xkaliber_agent_session_v38_4.json');
 const legacyFiles = [
     'xkaliber_agent_session_v37_9_1.json',
     'xkaliber_agent_session_v37.json',
@@ -995,7 +995,9 @@ const webServer = http.createServer((req, res) => {
 
     const url = req.url.split('?')[0];
     const authHeader = req.headers['authorization'];
-    const token = authHeader ? authHeader.replace('Bearer ', '') : null;
+    const parsedUrlForAuth = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const queryToken = parsedUrlForAuth.searchParams.get('token');
+    const token = authHeader ? authHeader.replace('Bearer ', '') : queryToken;
     const user = authManager.verifyToken(token);
     const isAuthenticated = !!user;
     const canUseApp = isAuthenticated && user.permissions.canUseApp;
@@ -1119,6 +1121,25 @@ const webServer = http.createServer((req, res) => {
             }
         });
         return;
+    }
+
+    // File Download Endpoint
+    if (url.startsWith('/download_remote')) {
+        const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
+        const fileToDownload = parsedUrl.searchParams.get('file');
+        if (fileToDownload && fs.existsSync(fileToDownload)) {
+            res.writeHead(200, {
+                'Content-Disposition': `attachment; filename="${path.basename(fileToDownload)}"`,
+                'Access-Control-Allow-Origin': '*'
+            });
+            const readStream = fs.createReadStream(fileToDownload);
+            readStream.pipe(res);
+            return;
+        } else {
+            res.writeHead(404, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+            res.end('File not found');
+            return;
+        }
     }
 
     // Static File Serving

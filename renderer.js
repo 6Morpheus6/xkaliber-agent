@@ -331,6 +331,14 @@ const AGENT_TOOLS = [
     {
         type: "function",
         function: {
+            name: "provide_file_download_link",
+            description: "Provide the user with a direct download link to a file on the host system. Useful when the user is accessing the agent remotely and needs to download a local file.",
+            parameters: { type: "object", properties: { filepath: { type: "string" } }, required: ["filepath"] }
+        }
+    },
+    {
+        type: "function",
+        function: {
             name: "run_shell_command",
             description: "Execute a bash shell command. USE THIS to check system state, running processes (e.g., 'ps aux', 'top'), network, or execute scripts. If sudo is needed, it will be automatically handled. If the task is long-running (like compilation or starting a server), set is_background to true and use the returned job ID with read_process_log.",
             parameters: { type: "object", properties: { command: { type: "string" }, is_background: { type: "boolean", description: "Set to true to run in the background and return a job ID immediately." } }, required: ["command"] }
@@ -768,7 +776,7 @@ async function init() {
 
 GUARD RAILS:
 1. SECURE ACCESS: This version (v33) includes secure login and account creation. Access is restricted to authorized users only.
-2. STRICT ACTION LIMITS: Never use file modification tools like write_file, delete_file, or run_shell_command unless explicitly requested by the user. 
+2. STRICT ACTION LIMITS: Never use file modification tools unless explicitly requested by the user. If the user asks to download a file, ALWAYS use the provide_file_download_link tool. 
 3. NO UNPROMPTED SETUP: Do not set up configuration files or scripts unprompted. If you are asked to read or list files, do not follow up with write actions. 
 4. PREVENT HALLUCINATIONS: If you are unsure of the user's intent or lack context, DO NOT guess or hallucinate a tool call. Instead, ask the user for clarification.
 
@@ -1025,6 +1033,13 @@ async function executeTool(name, args) {
         return "I searched the web but couldn't find any relevant results for that query.";
     }
     if (name === 'send_whatsapp_message') return (await window.api.invoke('whatsapp-send', { number: args.number, message: args.message })).success ? "Success" : "Error";
+    
+    if (name === 'provide_file_download_link') {
+        const encodedPath = encodeURIComponent(args.filepath);
+        const fileName = args.filepath.split(/[\/\\]/).pop();
+        return `I have generated the download link. Provide this exact markdown to the user: [Download ${fileName}](/download_remote?file=${encodedPath})`;
+    }
+
     if (name === 'memory_purge') {
         console.log(`Model requested memory purge. Reason: ${args.reason}`);
         // Memory purge request handled contextually, no longer wipes UI history
@@ -1352,7 +1367,7 @@ CRITICAL: If you are asked to modify, create, or read files, you MUST use the pr
 
 GUARD RAILS:
 1. SECURE ACCESS: This version (v38) includes secure login and account creation. Access is restricted to authorized users only.
-2. STRICT ACTION LIMITS: Never use file modification tools like write_file, delete_file, or run_shell_command unless explicitly requested by the user. 
+2. STRICT ACTION LIMITS: Never use file modification tools unless explicitly requested by the user. If the user asks to download a file, ALWAYS use the provide_file_download_link tool. 
 3. NO UNPROMPTED SETUP: Do not set up configuration files or scripts unprompted. If you are asked to read or list files, do not follow up with write actions. 
 4. PREVENT HALLUCINATIONS: If you are unsure of the user's intent or lack context, DO NOT guess or hallucinate a tool call. Instead, ask the user for clarification.
 
@@ -1914,3 +1929,16 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
 sendBtn.addEventListener('click', sendMessage);
 userInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
 checkAuth();
+
+
+// Intercept download links to append auth token
+document.addEventListener('click', (e) => {
+    const target = e.target.closest('a');
+    if (target && target.getAttribute('href')?.startsWith('/download_remote')) {
+        e.preventDefault();
+        const token = localStorage.getItem('auth_token');
+        let url = target.getAttribute('href');
+        if (token) url += `&token=${token}`;
+        window.location.href = url;
+    }
+});

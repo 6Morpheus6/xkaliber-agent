@@ -10,6 +10,14 @@ const AGENT_TOOLS = [
     {
         type: 'function',
         function: {
+            name: 'provide_file_download_link',
+            description: 'Provide the user with a direct download link to a file on the host system. Useful when the user is accessing the agent remotely and needs to download a local file.',
+            parameters: { type: 'object', properties: { filepath: { type: 'string' } }, required: ['filepath'] }
+        }
+    },
+    {
+        type: 'function',
+        function: {
             name: 'task_begin',
             description: 'State your goal and a multi-step plan before starting a complex task. This helps maintain focus and context.',
             parameters: { type: 'object', properties: { goal: { type: 'string' }, plan: { type: 'array', items: { type: 'string' } } }, required: ['goal', 'plan'] }
@@ -156,7 +164,14 @@ async function executeTool(name, args) {
     if (name === 'task_begin') return 'Task started. Please proceed with your plan.';
     if (name === 'task_complete') return 'Task completed. Finalizing response.';
     
-    if (name === 'web_search') return await performWebSearch(args.query);
+    if (name === 'web_search') return await performWebSearch(args.query);    
+    if (name === 'provide_file_download_link') {
+        if (!fs.existsSync(args.filepath)) return `Error: File does not exist at ${args.filepath}`;
+        const encodedPath = encodeURIComponent(args.filepath);
+        const fileName = path.basename(args.filepath);
+        return `I have generated the download link. Provide this exact markdown to the user: [Download ${fileName}](/download_remote?file=${encodedPath})`;
+    }
+
     
     if (name === 'run_shell_command') {
         if (args.is_background) {
