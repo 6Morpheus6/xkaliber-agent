@@ -294,9 +294,9 @@ ipcMain.handle('auth-has-users', async () => {
     return { hasUsers: authManager.hasUsers() };
 });
 
-const historyFile = path.join(userDataPath, 'xkaliber_agent_session_v37_9_1.json');
+const historyFile = path.join(userDataPath, 'xkaliber_agent_session_v38_3.json');
 const legacyFiles = [
-    'xkaliber_agent_session_v37_9.json',
+    'xkaliber_agent_session_v37_9_1.json',
     'xkaliber_agent_session_v37.json',
     'xkaliber_agent_session_v36.json',
     'xkaliber_agent_session_v35.json',
