@@ -1,14 +1,13 @@
 # Xkaliber Agent v38 Changelog
 
-## [38.4.0] - 2026-05-19
+## [38.5.0] - 2026-05-19
 
 ### Added
 - **Remote File Downloads**: Added a new agent tool (`provide_file_download_link`) that allows the AI to generate secure, direct download links for local files. This is especially useful when accessing the agent remotely via Cloudflare tunnels.
 - **Secure Download Endpoint**: Introduced a `/download_remote` endpoint to the local web server to securely stream requested files over the network.
 
 ### Fixed
-- **Download Authorization**: Fixed an "Unauthorized" error where direct link clicks bypassed the "Bearer" token header. Implemented a global link interceptor in the UI that injects the auth token into the query string, alongside backend support for query-based token validation.
-- **Tool Schema Duplication Bug**: Fixed an issue where the agent hallucinated when trying to use the new download tool due to mismatched tool schemas between `tools.js` and `renderer.js`. 
+- **Download Authorization**: Implemented a global link interceptor in the UI that injects the auth token into the query string, alongside backend support for query-based token validation.
 
 ## [38.3.0] - 2026-05-18
 

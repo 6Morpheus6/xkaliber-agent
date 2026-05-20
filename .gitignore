@@ -1,9 +1,6 @@
 node_modules/
 dist/
 build/
-*.log
-*.deb
-*.AppImage
-.env
 .DS_Store
+*.log
 xagent-cli/build/
