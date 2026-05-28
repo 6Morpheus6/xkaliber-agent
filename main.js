@@ -1227,6 +1227,15 @@ ipcMain.handle('get-host-url', async () => {
     };
 });
 
+ipcMain.handle('open-external-url', async (event, url) => {
+    try {
+        await shell.openExternal(url);
+        return { success: true };
+    } catch (e) {
+        return { error: e.message };
+    }
+});
+
 ipcMain.handle('get-env-info', async () => {
     return {
         platform: os.platform(),

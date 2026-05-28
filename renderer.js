@@ -68,6 +68,8 @@ const tempSlider = document.getElementById('temp-slider');
 const tempVal = document.getElementById('temp-val');
 const ctxSlider = document.getElementById('ctx-slider');
 const ctxVal = document.getElementById('ctx-val');
+const stepsSlider = document.getElementById('steps-slider');
+const stepsVal = document.getElementById('steps-val');
 const statusDot = document.getElementById('status-dot');
 const statusText = document.getElementById('status-text');
 const messagesContainer = document.getElementById('messages');
@@ -114,7 +116,7 @@ const vramBarFill = document.getElementById('vram-bar-fill');
 const ramBarFill = document.getElementById('ram-bar-fill');
 
 // --- Uplink Mode & Server Config ---
-const uplinkMode = document.getElementById('uplink-mode');
+const uplinkMode = { checked: true }; // Forced true in v39.4: Ollama removed from UI selection
 const lmsServerContainer = document.getElementById('lms-server-container');
 const lmsServerInput = document.getElementById('lms-server-input');
 
@@ -142,35 +144,21 @@ const closeAdminBtn = document.getElementById('close-admin-btn');
 const agentToggle = document.getElementById('agent-toggle');
 
 const OLLAMA_API = 'http://127.0.0.1:11434/api';
-let currentApiBase = OLLAMA_API;
+let currentApiBase = 'http://localhost:1234'; 
 
-if (uplinkMode) {
-    uplinkMode.addEventListener('change', () => {
-        lmsServerContainer.style.display = uplinkMode.checked ? 'block' : 'none';
+if (lmsServerInput) {
+    lmsServerInput.addEventListener('change', () => {
         updateApiBase();
         fetchModels();
     });
 }
 
-if (lmsServerInput) {
-    lmsServerInput.addEventListener('change', () => {
-        if (uplinkMode.checked) {
-            updateApiBase();
-            fetchModels();
-        }
-    });
-}
-
 function updateApiBase() {
-    if (uplinkMode.checked) {
-        let server = lmsServerInput.value.trim();
-        if (server.endsWith('/')) server = server.slice(0, -1);
-        currentApiBase = server;
-        // Notify host of URL change (for any host-side features)
-        window.api.invoke('set-lms-url', [currentApiBase]);
-    } else {
-        currentApiBase = OLLAMA_API;
-    }
+    let server = lmsServerInput.value.trim();
+    if (server.endsWith('/')) server = server.slice(0, -1);
+    currentApiBase = server;
+    // Notify host of URL change (for any host-side features)
+    window.api.invoke('set-lms-url', [currentApiBase]);
 }
 
 let attachedFiles = [];
@@ -321,9 +309,9 @@ function renderAttachments() {
 }
 
 // --- Param Displays ---
-[tempSlider, ctxSlider].forEach(s => s && s.addEventListener('input', () => {
+[tempSlider, stepsSlider].forEach(s => s && s.addEventListener('input', () => {
     if (tempVal) tempVal.textContent = parseFloat(tempSlider.value).toFixed(1);
-    if (ctxVal) ctxVal.textContent = ctxSlider.value;
+    if (stepsVal) stepsVal.textContent = stepsSlider.value;
 }));
 
 // --- Agent Tool Definitions ---
@@ -772,10 +760,10 @@ async function init() {
             }
         } catch (e) {}
 
-        const baseSystemPrompt = `You are Xkaliber Agent v36, a conversational AI assistant (AMD Optimized). You have access to persistent vector memory, web search, and system tools. Respond naturally and conversationally to the user. Do not invoke tools for casual conversation or greetings.
+        const systemPrompt = `You are Xkaliber Agent v39.4, a conversational AI assistant (AMD Optimized). You have access to persistent vector memory, web search, and system tools. Respond naturally and conversationally to the user. Do not invoke tools for casual conversation or greetings.
 
-GUARD RAILS:
-1. SECURE ACCESS: This version (v33) includes secure login and account creation. Access is restricted to authorized users only.
+        GUARD RAILS:
+        1. SECURE ACCESS: This version (v39.4) includes secure login and account creation. Access is restricted to authorized users only.
 2. STRICT ACTION LIMITS: Never use file modification tools unless explicitly requested by the user. If the user asks to download a file, ALWAYS use the provide_file_download_link tool. 
 3. NO UNPROMPTED SETUP: Do not set up configuration files or scripts unprompted. If you are asked to read or list files, do not follow up with write actions. 
 4. PREVENT HALLUCINATIONS: If you are unsure of the user's intent or lack context, DO NOT guess or hallucinate a tool call. Instead, ask the user for clarification.
@@ -809,25 +797,17 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
 
 async function fetchModels(retries = 3) {
     try {
-        if (uplinkMode.checked) {
-            // LM Studio / OpenAI Format
-            const res = await fetch(`${currentApiBase}/v1/models`, {
-                headers: { 'Authorization': 'Bearer lm-studio' }
-            });
-            if (!res.ok) throw new Error('LMS Offline or Incorrect URL');
-            const data = await res.json();
-            const models = data.data || data; 
-            if (Array.isArray(models)) {
-                modelSelect.innerHTML = models.map(m => `<option value="${m.id || m}">${m.id || m}</option>`).join('');
-            } else {
-                throw new Error('Unexpected models format');
-            }
+        // LM Studio / OpenAI Format (Primary UI backend in v39.4)
+        const res = await fetch(`${currentApiBase}/v1/models`, {
+            headers: { 'Authorization': 'Bearer lm-studio' }
+        });
+        if (!res.ok) throw new Error('AI Backend Offline or Incorrect URL');
+        const data = await res.json();
+        const models = data.data || data; 
+        if (Array.isArray(models)) {
+            modelSelect.innerHTML = models.map(m => `<option value="${m.id || m}">${m.id || m}</option>`).join('');
         } else {
-            // Ollama Format
-            const res = await fetch(`${currentApiBase}/tags`);
-            if (!res.ok) throw new Error('Ollama Offline');
-            const data = await res.json();
-            modelSelect.innerHTML = data.models.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
+            throw new Error('Unexpected models format');
         }
     } catch (err) {
         console.error(`Fetch Models Error (retries left: ${retries}):`, err);
@@ -903,14 +883,16 @@ async function checkHardwareHealth() {
 }
 
 async function checkConnection() {
-    const endpoint = uplinkMode.checked ? `${currentApiBase}/v1/models` : `${currentApiBase}/tags`;
-    
+    const endpoint = `${currentApiBase}/v1/models`;
+
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s timeout for health check
-    
+
     try {
-        const res = await fetch(endpoint, { signal: controller.signal });
-        clearTimeout(timeoutId);
+        const res = await fetch(endpoint, { 
+            headers: { 'Authorization': 'Bearer lm-studio' },
+            signal: controller.signal 
+        });        clearTimeout(timeoutId);
         
         if (res.ok) {
             setStatus(true, 'ONLINE');
@@ -1090,7 +1072,7 @@ function pruneChatHistory(historyArray, forceAggressive = false, currentTurnCoun
     }
 
     // --- LM STUDIO STRICT CONTEXT ENFORCEMENT ---
-    const ctxLimitTokens = parseInt(document.getElementById('ctx-slider')?.value || "8192");
+    const ctxLimitTokens = 131072; // Default to max since LM Studio handles it, but we need a cap for pruning.
     // Leave 45% for generation! Writing large files (like games) requires huge output limits.
     const allowedPromptTokens = Math.floor(ctxLimitTokens * 0.55); 
     const MAX_ALLOWED_CHARS = allowedPromptTokens * 3.5; // Approx 3.5 chars per token
@@ -1354,7 +1336,7 @@ CRITICAL RULES:
                 }
             } catch (e) {}
             
-            const systemPrompt = `You are Xkaliber Agent v38, a conversational AI assistant (AMD Optimized). You have access to persistent vector memory, web search, and system tools. Respond naturally and conversationally to the user. Do not invoke tools for casual conversation or greetings.
+            const systemPrompt = `You are Xkaliber Agent v39.4, a conversational AI assistant (AMD Optimized). You have access to persistent vector memory, web search, and system tools. Respond naturally and conversationally to the user. Do not invoke tools for casual conversation or greetings.
 
 AUTONOMOUS WORKFLOW:
 You support a 'Plan-Execute-Verify' loop. For complex requests (especially file system tasks):
@@ -1366,7 +1348,7 @@ You support a 'Plan-Execute-Verify' loop. For complex requests (especially file 
 CRITICAL: If you are asked to modify, create, or read files, you MUST use the provided tools (write_file, read_file, run_shell_command) immediately. Do not hesitate.
 
 GUARD RAILS:
-1. SECURE ACCESS: This version (v38) includes secure login and account creation. Access is restricted to authorized users only.
+1. SECURE ACCESS: This version (v39.4) includes secure login and account creation. Access is restricted to authorized users only.
 2. STRICT ACTION LIMITS: Never use file modification tools unless explicitly requested by the user. If the user asks to download a file, ALWAYS use the provide_file_download_link tool. 
 3. NO UNPROMPTED SETUP: Do not set up configuration files or scripts unprompted. If you are asked to read or list files, do not follow up with write actions. 
 4. PREVENT HALLUCINATIONS: If you are unsure of the user's intent or lack context, DO NOT guess or hallucinate a tool call. Instead, ask the user for clarification.
@@ -1423,10 +1405,11 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
         console.log(`Connecting to Uplink at ${currentApiBase}...`);
         let finished = false;
         let turnCount = 0;
+        const maxSteps = parseInt(stepsSlider?.value || "20");
         
         trace.addStep('routing.selected_capability', 'routing', 'ok', 'ROUTE_OK', 0, model);
 
-        while (!finished && turnCount < 20) {
+        while (!finished && turnCount < maxSteps) {
             turnCount++;
             
             // RESOURCE OPTIMIZATION: Prune history if needed before each turn, passing turnCount
@@ -1436,7 +1419,7 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
             
             // Provide visual feedback for the current step
             if (turnCount > 1) {
-                 botDiv.innerHTML = `<span class="loading-pulse">Thinking (Step ${turnCount}/20)...</span>`;
+                 botDiv.innerHTML = `<span class="loading-pulse">Thinking (Step ${turnCount}/${maxSteps})...</span>`;
             }
             
             let activeTools = [];
@@ -1464,6 +1447,8 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
                         if (transientMemoryContext) {
                             msg.content += transientMemoryContext;
                         }
+                        const currentDate = new Date().toLocaleString();
+                        msg.content += `\n\n[SYSTEM CLOCK] The current host date and time is: ${currentDate}. Always use this exact time when asked.`;
                     } 
                     else if (m.role === 'user') {
                         msg.content = String(m.content || "");
@@ -1556,10 +1541,14 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
                     return msg;
                 });
 
-                if (transientMemoryContext && messagesForOllama.length > 0) {
+                if (messagesForOllama.length > 0) {
                     const systemIdx = messagesForOllama.findIndex(m => m.role === 'system');
                     if (systemIdx !== -1) {
-                        messagesForOllama[systemIdx].content += transientMemoryContext;
+                        if (transientMemoryContext) {
+                            messagesForOllama[systemIdx].content += transientMemoryContext;
+                        }
+                        const currentDate = new Date().toLocaleString();
+                        messagesForOllama[systemIdx].content += `\n\n[SYSTEM CLOCK] The current host date and time is: ${currentDate}. Always use this exact time when asked.`;
                     }
                 }
 
@@ -1604,9 +1593,9 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
             // Provide visual feedback for the current step while keeping previous output
             const existingText = botDiv.innerHTML.replace(/<span class="loading-pulse">.*?<\/span><br><br>/g, '').trim();
             if (existingText && !existingText.includes('Thinking...')) {
-                 botDiv.innerHTML = `<span class="loading-pulse">Thinking (Step ${turnCount}/20)...</span><br><br>${existingText}`;
+                 botDiv.innerHTML = `<span class="loading-pulse">Thinking (Step ${turnCount}/${maxSteps})...</span><br><br>${existingText}`;
             } else {
-                 botDiv.innerHTML = `<span class="loading-pulse">Thinking (Step ${turnCount}/20)...</span>`;
+                 botDiv.innerHTML = `<span class="loading-pulse">Thinking (Step ${turnCount}/${maxSteps})...</span>`;
             }
 
             const readWithTimeout = (reader, timeoutMs) => {
@@ -1665,7 +1654,7 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
                                         const baseWebStyles = `<style>:host { display: block; max-width: 100%; overflow-x: auto; } body { word-wrap: break-word; overflow-wrap: break-word; max-width: 100%; box-sizing: border-box; } *, *::before, *::after { box-sizing: border-box; max-width: 100%; } img, video, iframe, canvas { max-width: 100%; height: auto; } pre, code, table { max-width: 100%; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }</style>`;
                                         botDiv.shadowRoot.innerHTML = baseWebStyles + cleanHtml;
                                     } else {
-                                        botDiv.innerHTML = `<span class="loading-pulse">Thinking (Step ${turnCount}/20)...</span><br><br>${existingText ? existingText + '<br><br>' : ''}${window.markedParse(fullContent)}`;
+                                        botDiv.innerHTML = `<span class="loading-pulse">Thinking (Step ${turnCount}/${maxSteps})...</span><br><br>${existingText ? existingText + '<br><br>' : ''}${window.markedParse(fullContent)}`;
                                     }
                                 }
                                 if (delta?.tool_calls) {
@@ -1717,7 +1706,7 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
                                     const baseWebStyles = `<style>:host { display: block; max-width: 100%; overflow-x: auto; } body { word-wrap: break-word; overflow-wrap: break-word; max-width: 100%; box-sizing: border-box; } *, *::before, *::after { box-sizing: border-box; max-width: 100%; } img, video, iframe, canvas { max-width: 100%; height: auto; } pre, code, table { max-width: 100%; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }</style>`;
                                     botDiv.shadowRoot.innerHTML = baseWebStyles + cleanHtml;
                                 } else {
-                                    botDiv.innerHTML = `<span class="loading-pulse">Thinking (Step ${turnCount}/20)...</span><br><br>${existingText ? existingText + '<br><br>' : ''}${window.markedParse(fullContent)}`;
+                                    botDiv.innerHTML = `<span class="loading-pulse">Thinking (Step ${turnCount}/${maxSteps})...</span><br><br>${existingText ? existingText + '<br><br>' : ''}${window.markedParse(fullContent)}`;
                                 }
                             }
                             // V38: Better tool call handling for Ollama - append instead of overwrite
@@ -1931,14 +1920,28 @@ userInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKe
 checkAuth();
 
 
-// Intercept download links to append auth token
+// Intercept download links to append auth token and prevent UI crash
 document.addEventListener('click', (e) => {
     const target = e.target.closest('a');
     if (target && target.getAttribute('href')?.startsWith('/download_remote')) {
         e.preventDefault();
         const token = localStorage.getItem('auth_token');
         let url = target.getAttribute('href');
-        if (token) url += `&token=${token}`;
-        window.location.href = url;
+        if (token) {
+            url += url.includes('?') ? `&token=${token}` : `?token=${token}`;
+        }
+        
+        // If we are in Electron, use the host to open it safely in the default browser or trigger download
+        if (!isWebMode) {
+            window.api.invoke('get-host-url').then(hostInfo => {
+                if (hostInfo && hostInfo.url) {
+                    const fullUrl = hostInfo.url + url;
+                    window.api.invoke('open-external-url', fullUrl);
+                }
+            });
+        } else {
+            // In web mode, just navigate (it's safe in a real browser as it triggers a download)
+            window.location.href = url;
+        }
     }
 });

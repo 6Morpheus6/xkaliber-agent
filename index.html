@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Xkaliber Agent v38.5 // Autonomous Workflow</title>
+    <title>Xkaliber Agent v39.3 // Autonomous Workflow</title>
     <style>
         :root {
             --bg-color: #0d1117;
@@ -680,7 +680,7 @@
 </head>
 <body>
     <div id="sidebar">
-        <h1><span id="resource-status-dot" class="status-dot" title="Resource Status: Healthy"></span>XKALIBER AGENT <span style="font-size: 0.7rem; color: var(--accent-dim);">v38.5</span></h1>
+        <h1><span id="resource-status-dot" class="status-dot" title="Resource Status: Healthy"></span>XKALIBER AGENT <span style="font-size: 0.7rem; color: var(--accent-dim);">v39.4</span></h1>
         
         <div class="control-group" style="margin-bottom: 10px;">
             <div class="toggle-row">
@@ -695,14 +695,9 @@
                     OFFLINE BROWSER
                 </label>
             </div>
-            <div class="toggle-row">
-                <label class="toggle-label" for="uplink-mode">
-                    <input type="checkbox" id="uplink-mode">
-                    LM STUDIO MODE
-                </label>
-            </div>
-            <div id="lms-server-container" style="display: none; margin-top: 10px;">
-                <label for="lms-server-input">LMS SERVER</label>
+            <!-- LM STUDIO MODE toggle removed, forcing LM Studio as primary UI backend -->
+            <div id="lms-server-container" style="margin-top: 10px;">
+                <label for="lms-server-input">AI BACKEND (URL)</label>
                 <input type="text" id="lms-server-input" style="width: 100%; background: var(--input-bg); color: var(--text-color); border: 1px solid var(--border-color); padding: 5px; border-radius: 4px; outline: none;" value="http://localhost:1234">
             </div>
         </div>
@@ -735,10 +730,10 @@
             <input type="range" id="temp-slider" min="0.0" max="2.0" step="0.1" value="0.7">
 
             <div class="param-row" style="margin-top: 10px;">
-                <label for="ctx-slider">Context Size (ctx)</label>
-                <span class="param-val" id="ctx-val">4096</span>
+                <label for="steps-slider">Thinking Steps</label>
+                <span class="param-val" id="steps-val">20</span>
             </div>
-            <input type="range" id="ctx-slider" min="2048" max="131072" step="2048" value="4096">
+            <input type="range" id="steps-slider" min="5" max="100" step="1" value="20">
         </div>
 
         <div class="control-group">
