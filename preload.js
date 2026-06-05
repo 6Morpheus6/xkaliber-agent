@@ -24,24 +24,34 @@ try {
 }
 
 const INVOKE_CHANNELS = [
-    'whatsapp-init', 'whatsapp-send', 'open-file-dialog',
+    'whatsapp-init', 'whatsapp-send', 'open-file-dialog', 'select-directory',
     'load-history', 'save-history', 'clear-history',
     'agent-run-command', 'agent-read-file', 'agent-write-file',
-    'agent-delete-file', 'agent-list-directory',
+    'agent-delete-file', 'agent-list-directory', 'agent-list-project',
     'agent-read-process-log', 'agent-send-input',
+    'agent-stop-process', 'agent-list-processes', 'agent-fetch-url',
+    'agent-grep', 'agent-glob', 'agent-get-repo-map', 'agent-verify', 'agent-doctor',
+    'edit-apply', 'edit-apply-patch', 'edit-apply-batch',
+    'project-get-root', 'project-set-root', 'project-resolve-path',
+    'plan-create', 'plan-load', 'plan-save', 'plan-list-active', 'plan-approve', 'plan-detect', 'plan-add-steps',
+    'ledger-diff', 'ledger-revert-all',
+    'git-init', 'git-status', 'git-diff', 'git-commit', 'git-undo', 'git-log',
     'perform-search',
     'mem-store', 'mem-query', 'mem-count', 'mem-clear',
-    'export-session', 'import-session', 'get-host-url', 'get-env-info',
+    'export-session', 'import-session', 'get-host-url', 'get-env-info', 'open-external-url',
     'get-gpu-telemetry', 'app-reset',
     'auth-login', 'auth-register', 'auth-check', 'auth-logout', 'auth-has-users',
-    'auth-get-users', 'auth-update-user'
+    'auth-get-users', 'auth-update-user',
+    'plugins-list', 'plugins-get-contributions', 'plugin-invoke-tool',
+    'plugin-run-command', 'plugin-fire-hook', 'plugin-set-enabled',
+    'plugin-uninstall', 'plugin-install'
 ];
 
 const SEND_CHANNELS = ['tts-speak', 'tts-stop'];
 
 const RECEIVE_CHANNELS = [
     'whatsapp-qr', 'whatsapp-ready', 'whatsapp-error', 'whatsapp-disconnected',
-    'tts-error', 'tts-finished', 'resource-update'
+    'tts-error', 'tts-finished', 'resource-update', 'plugin-ui-event'
 ];
 
 contextBridge.exposeInMainWorld('api', {

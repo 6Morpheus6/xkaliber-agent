@@ -3,8 +3,13 @@ const https = require('https');
 const path = require('path');
 const fs = require('fs');
 const { spawn, execSync } = require('child_process');
+const netGuard = require('./lib/netGuard.js');
 
 const WEB_PORT = 3000;
+// This standalone proxy is unauthenticated, so restrict targets to loopback by
+// default (the local LLM server). Set XK_LLM_ORIGIN to also allow a specific
+// remote LLM origin, e.g. http://192.168.1.50:1234
+const LLM_ORIGIN = process.env.XK_LLM_ORIGIN || 'http://127.0.0.1:1234';
 
 let remoteUrl = null;
 async function startCloudflareTunnel() {
@@ -68,8 +73,12 @@ const webServer = http.createServer((req, res) => {
         if (!targetUrl) {
             res.writeHead(400); return res.end('Missing x-target-url header');
         }
+        const parsed = netGuard.validateProxyTarget(targetUrl, LLM_ORIGIN);
+        if (!parsed) {
+            res.writeHead(403, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+            return res.end(JSON.stringify({ error: 'Proxy target not allowed (loopback / configured LLM origin only).' }));
+        }
         try {
-            const parsed = new URL(targetUrl);
             const transport = parsed.protocol === 'https:' ? https : http;
             const options = {
                 hostname: parsed.hostname,
@@ -78,11 +87,13 @@ const webServer = http.createServer((req, res) => {
                 method: req.method,
                 headers: { ...req.headers, host: parsed.host }
             };
-            
+
             delete options.headers['origin'];
             delete options.headers['referer'];
             delete options.headers['x-target-url'];
-            delete options.headers['accept-encoding']; 
+            delete options.headers['accept-encoding'];
+            delete options.headers['authorization'];
+            delete options.headers['cookie'];
             
             const proxyReq = transport.request(options, (proxyRes) => {
                 // Merge target headers with our required CORS headers

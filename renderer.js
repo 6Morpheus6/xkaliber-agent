@@ -142,6 +142,345 @@ const adminOverlay = document.getElementById('admin-overlay');
 const adminUserList = document.getElementById('admin-user-list');
 const closeAdminBtn = document.getElementById('close-admin-btn');
 const agentToggle = document.getElementById('agent-toggle');
+const buildModeToggle = document.getElementById('build-mode-toggle');
+const buildModeUi = document.getElementById('build-mode-ui');
+const buildModeHint = document.getElementById('build-mode-hint');
+const planPanel = document.getElementById('plan-panel');
+const planGoalEl = document.getElementById('plan-goal');
+const planStepsList = document.getElementById('plan-steps-list');
+const planStepTracker = document.getElementById('plan-step-tracker');
+const planApproveBtn = document.getElementById('plan-approve-btn');
+const planAbortBtn = document.getElementById('plan-abort-btn');
+const reviewPanel = document.getElementById('review-panel');
+const reviewDiffEl = document.getElementById('review-diff');
+const revertAllBtn = document.getElementById('revert-all-btn');
+const resumeBanner = document.getElementById('resume-banner');
+const resumeText = document.getElementById('resume-text');
+const resumeBtn = document.getElementById('resume-btn');
+
+let activePlan = null;
+let planApprovalCallbacks = null;
+
+function isBuildModeEnabled() {
+    return buildModeToggle?.checked === true;
+}
+
+function updateBuildModeUI() {
+    const buildOn = isBuildModeEnabled();
+    if (buildModeUi) buildModeUi.style.display = buildOn ? 'block' : 'none';
+    if (buildModeHint) buildModeHint.style.display = buildOn ? 'block' : 'none';
+    const hereIAmBtn = document.getElementById('here-i-am-btn');
+    if (hereIAmBtn) hereIAmBtn.style.display = buildOn ? 'block' : 'none';
+    const wsStatus = document.getElementById('workspace-status');
+    if (wsStatus) wsStatus.style.display = buildOn ? (wsStatus.textContent ? 'block' : 'none') : 'none';
+    if (userInput) {
+        userInput.placeholder = buildOn
+            ? 'Describe a coding task to plan and build...'
+            : 'Enter command...';
+    }
+    if (!buildOn) {
+        if (planPanel && (!activePlan || !['executing', 'awaiting_approval'].includes(activePlan.status))) {
+            planPanel.style.display = 'none';
+        }
+        if (reviewPanel && (!activePlan || activePlan.status !== 'done')) {
+            reviewPanel.style.display = 'none';
+        }
+    }
+    if (activePlan && resumeBanner && ['executing', 'awaiting_approval'].includes(activePlan.status)) {
+        resumeText.textContent = buildOn
+            ? `Incomplete task: ${activePlan.goal} (step ${activePlan.currentStepId || '?'})`
+            : `Paused task: ${activePlan.goal}. Enable BUILD MODE to resume.`;
+        resumeBanner.style.display = 'block';
+    }
+    enforceModeExclusivity();
+}
+
+// C4: BUILD MODE supersedes the other special-mode toggles in dispatch, so make the
+// relationship explicit instead of letting them silently combine (e.g. the offline-
+// browser/netrunner prompt rewrites leaking into a build goal). When build mode is on,
+// those modes are switched off and disabled; when off, they're restored.
+function enforceModeExclusivity() {
+    const buildOn = isBuildModeEnabled();
+    ['netrunner-toggle', 'offline-browser-toggle'].forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (buildOn && el.checked) el.checked = false;
+        el.disabled = buildOn;
+        const row = el.closest('.toggle-row');
+        if (row) row.style.opacity = buildOn ? '0.5' : '';
+    });
+    // Agent (legacy chat tools) is also superseded by build mode; just clear it when
+    // build mode is on. Don't touch its disabled state — admin policy may control that.
+    if (buildOn && agentToggle && agentToggle.checked) agentToggle.checked = false;
+}
+
+if (buildModeToggle) {
+    const savedBuild = localStorage.getItem('xkaliber_build_mode');
+    if (savedBuild === 'true') buildModeToggle.checked = true;
+    buildModeToggle.addEventListener('change', () => {
+        if (buildModeToggle.disabled) return;
+        localStorage.setItem('xkaliber_build_mode', buildModeToggle.checked ? 'true' : 'false');
+        updateBuildModeUI();
+    });
+    setBuildLock(false);
+    updateBuildModeUI();
+}
+
+// C1: lock the BUILD MODE toggle while a plan task is running. The plan/review/approve
+// panels live inside #build-mode-ui, so toggling build mode off mid-task would hide the
+// APPROVE/REVERT controls and strand the run. Disabling the toggle (no markup change)
+// prevents that; it is re-enabled when the task ends.
+function setBuildLock(locked) {
+    if (!buildModeToggle) return;
+    buildModeToggle.disabled = !!locked;
+    const row = buildModeToggle.closest('.toggle-row');
+    if (row) {
+        row.style.opacity = locked ? '0.6' : '';
+        row.title = locked ? 'Locked while a build task is running' : '';
+    }
+}
+
+function syncBuildLock() {
+    const locked = !!(
+        isSending &&
+        activePlan &&
+        ['executing', 'awaiting_approval'].includes(activePlan.status)
+    );
+    setBuildLock(locked);
+}
+
+// Fully cancel + discard the active plan so a stopped/lingering task can't trap the
+// user in Build Mode. Aborts any running loop, marks the plan aborted on disk, clears
+// all task state, unlocks the Build Mode toggle, and hides the plan/review/resume UI.
+async function cancelActivePlan() {
+    if (typeof planApprovalCallbacks !== 'undefined' && planApprovalCallbacks) {
+        try { planApprovalCallbacks.onAbort(); } catch (e) {}
+        planApprovalCallbacks = null;
+    }
+    if (abortController) { try { abortController.abort(); } catch (e) {} }
+    const cancelled = activePlan;
+    if (cancelled) {
+        cancelled.status = 'aborted';
+        try { await window.api.invoke('plan-save', cancelled); } catch (e) {}
+    }
+    // Clear all run state so nothing re-locks the toggle or offers a resume.
+    activePlan = null;
+    isSending = false;
+    abortController = null;
+    window._activeAgentCtx = null;
+    if (stopBtn) stopBtn.style.display = 'none';
+    setBuildLock(false);
+    if (planPanel) planPanel.style.display = 'none';
+    if (reviewPanel) reviewPanel.style.display = 'none';
+    if (resumeBanner) resumeBanner.style.display = 'none';
+    updateBuildModeUI();
+    if (cancelled) addMessage('system', `**Task cancelled:** ${cancelled.goal}. You can re-enable or leave Build Mode freely now.`);
+}
+
+function renderPlanPanel(plan, mode = 'approval') {
+    if (!planPanel || !plan) return;
+    if (!isBuildModeEnabled() && mode === 'approval') return;
+    planPanel.style.display = 'block';
+    planGoalEl.textContent = plan.goal;
+    planStepsList.innerHTML = '';
+    plan.steps.forEach((step, idx) => {
+        const li = document.createElement('li');
+        li.dataset.stepId = step.id;
+        li.style.marginBottom = '4px';
+        const statusIcon = step.status === 'done' ? '✓ ' : step.status === 'active' ? '▶ ' : step.status === 'failed' ? '✗ ' : '';
+        if (mode === 'approval') {
+            li.innerHTML = `<input type="text" class="plan-step-input" value="${step.title.replace(/"/g, '&quot;')}" style="width: 100%; background: var(--input-bg); color: var(--text-color); border: 1px solid var(--border-color); padding: 2px 4px; font-size: 0.75rem;">`;
+        } else {
+            li.textContent = `${statusIcon}${step.id}. ${step.title}`;
+            if (step.id === plan.currentStepId) li.style.color = '#9d4edd';
+        }
+        planStepsList.appendChild(li);
+    });
+    planApproveBtn.style.display = mode === 'approval' ? 'block' : 'none';
+    planAbortBtn.style.display = plan.status === 'executing' ? 'block' : 'none';
+    if (planStepTracker) {
+        const cur = plan.steps.find(s => s.id === plan.currentStepId);
+        planStepTracker.textContent = cur ? `Executing step ${cur.id}: ${cur.title}` : (plan.status === 'done' ? 'All steps complete' : '');
+    }
+}
+
+function getEditedPlanFromUI(plan) {
+    const inputs = planStepsList.querySelectorAll('.plan-step-input');
+    inputs.forEach((input, i) => {
+        if (plan.steps[i]) plan.steps[i].title = input.value.trim() || plan.steps[i].title;
+    });
+    return plan;
+}
+
+const planUI = {
+    showPlanPanel(plan, callbacks) {
+        activePlan = plan;
+        planApprovalCallbacks = callbacks;
+        renderPlanPanel(plan, 'approval');
+        syncBuildLock();
+    },
+    onStepUpdate(plan, step) {
+        activePlan = plan;
+        renderPlanPanel(plan, 'executing');
+        syncBuildLock();
+    },
+    onStepAdvance(plan) {
+        activePlan = plan;
+        renderPlanPanel(plan, 'executing');
+        syncBuildLock();
+    },
+    onPlanBlocked(plan) {
+        activePlan = plan;
+        renderPlanPanel(plan, 'executing');
+        syncBuildLock();
+        addMessage('system', `**Task blocked:** ${plan.scratchpad || 'Step failed'}`);
+    },
+    onReview(plan, diff, gitLines) {
+        activePlan = plan;
+        if (reviewPanel) reviewPanel.style.display = 'block';
+        if (reviewDiffEl) reviewDiffEl.textContent = diff || '(no changes)';
+        const gitLogEl = document.getElementById('review-git-log');
+        if (gitLogEl) gitLogEl.textContent = (gitLines && gitLines.length) ? gitLines.join('\n') : '(no git log)';
+        planPanel.style.display = 'block';
+        renderPlanPanel(plan, 'executing');
+    }
+};
+
+function syncPlanMetaFromUI(plan) {
+    const testEl = document.getElementById('plan-test-cmd');
+    const lintEl = document.getElementById('plan-lint-cmd');
+    if (testEl && testEl.value.trim()) plan.testCmd = testEl.value.trim();
+    if (lintEl && lintEl.value.trim()) plan.lintCmd = lintEl.value.trim();
+    return plan;
+}
+
+function fillPlanMetaUI(plan) {
+    const testEl = document.getElementById('plan-test-cmd');
+    const lintEl = document.getElementById('plan-lint-cmd');
+    if (testEl) testEl.value = plan.testCmd || '';
+    if (lintEl) lintEl.value = plan.lintCmd || '';
+}
+
+const plannerModelSelect = document.getElementById('planner-model-select');
+const editorModelSelect = document.getElementById('editor-model-select');
+
+let modelSelectsBound = false;
+function syncModelSelectsFromMain() {
+    if (!plannerModelSelect || !editorModelSelect || !modelSelect) return;
+    plannerModelSelect.innerHTML = modelSelect.innerHTML;
+    editorModelSelect.innerHTML = modelSelect.innerHTML;
+    const savedP = localStorage.getItem('xkaliber_planner_model');
+    const savedE = localStorage.getItem('xkaliber_editor_model');
+    if (savedP) plannerModelSelect.value = savedP;
+    else plannerModelSelect.value = modelSelect.value;
+    if (savedE) editorModelSelect.value = savedE;
+    else editorModelSelect.value = modelSelect.value;
+    if (!modelSelectsBound) {
+        modelSelectsBound = true;
+        plannerModelSelect.addEventListener('change', () => localStorage.setItem('xkaliber_planner_model', plannerModelSelect.value));
+        editorModelSelect.addEventListener('change', () => localStorage.setItem('xkaliber_editor_model', editorModelSelect.value));
+    }
+}
+
+function buildAgentCtxExtras(ctx) {
+    ctx.plannerModel = plannerModelSelect?.value || localStorage.getItem('xkaliber_planner_model') || ctx.model;
+    ctx.editorModel = editorModelSelect?.value || localStorage.getItem('xkaliber_editor_model') || ctx.model;
+    ctx.autoGitCommit = true;
+    return ctx;
+}
+
+if (planApproveBtn) {
+    planApproveBtn.addEventListener('click', () => {
+        if (!planApprovalCallbacks || !activePlan) return;
+        const edited = syncPlanMetaFromUI(getEditedPlanFromUI(JSON.parse(JSON.stringify(activePlan))));
+        planApprovalCallbacks.onApprove(edited);
+        planApprovalCallbacks = null;
+        planApproveBtn.style.display = 'none';
+    });
+}
+
+if (planAbortBtn) {
+    planAbortBtn.addEventListener('click', () => { cancelActivePlan(); });
+}
+
+const cancelPlanBtn = document.getElementById('cancel-plan-btn');
+if (cancelPlanBtn) {
+    cancelPlanBtn.addEventListener('click', () => { cancelActivePlan(); });
+}
+
+if (revertAllBtn) {
+    revertAllBtn.addEventListener('click', async () => {
+        if (!activePlan) return;
+        const res = await window.api.invoke('ledger-revert-all', activePlan.id);
+        addMessage('system', res.success ? `**Reverted** ${res.reverted?.length || 0} changes.` : `**Revert errors:** ${(res.errors || []).join(', ')}`);
+    });
+}
+
+const gitUndoBtn = document.getElementById('git-undo-btn');
+if (gitUndoBtn) {
+    gitUndoBtn.addEventListener('click', async () => {
+        const res = await window.api.invoke('git-undo');
+        addMessage('system', res.ok ? '**Git:** reverted last agent commit.' : `**Git undo failed:** ${res.error || res.stderr}`);
+    });
+}
+
+function updateWorkspaceStatus(rootPath) {
+    const el = document.getElementById('workspace-status');
+    if (!el) return;
+    if (rootPath) {
+        el.textContent = `📁 Workspace: ${rootPath}`;
+        el.style.color = '#3fb950';
+    } else {
+        el.textContent = '⚠️ No workspace selected — click "Here I am".';
+        el.style.color = '#d29922';
+    }
+    el.style.display = isBuildModeEnabled() ? 'block' : 'none';
+}
+
+async function applyWorkspace(rootPath, { announce = true } = {}) {
+    const rootRes = await window.api.invoke('project-set-root', rootPath);
+    if (rootRes.success) {
+        localStorage.setItem('xkaliber_workspace', rootRes.projectRoot);
+        updateWorkspaceStatus(rootRes.projectRoot);
+        if (announce) addMessage('system', `📍 **Workspace set to:** \`${rootRes.projectRoot}\`\nAgent will now perform tasks inside this directory.`);
+        return true;
+    }
+    if (announce) addMessage('system', `❌ **Failed to set workspace:** ${rootRes.error}`);
+    return false;
+}
+
+const hereBtn = document.getElementById('here-i-am-btn');
+if (hereBtn) {
+    hereBtn.addEventListener('click', async () => {
+        const res = await window.api.invoke('select-directory');
+        if (res && res.path) {
+            await applyWorkspace(res.path);
+        }
+    });
+}
+
+// Restore the last-selected workspace across restarts (main-process root is in-memory only).
+(async () => {
+    const saved = localStorage.getItem('xkaliber_workspace');
+    if (saved) {
+        const ok = await applyWorkspace(saved, { announce: false });
+        if (!ok) localStorage.removeItem('xkaliber_workspace');
+    } else {
+        updateWorkspaceStatus(null);
+    }
+})();
+
+if (resumeBtn) {
+    resumeBtn.addEventListener('click', async () => {
+        if (!activePlan) return;
+        if (buildModeToggle) buildModeToggle.checked = true;
+        localStorage.setItem('xkaliber_build_mode', 'true');
+        updateBuildModeUI();
+        resumeBanner.style.display = 'none';
+        addMessage('system', `Resuming task: **${activePlan.goal}**`);
+        await runResumedAgentTask(activePlan);
+    });
+}
 
 const OLLAMA_API = 'http://127.0.0.1:11434/api';
 let currentApiBase = 'http://localhost:1234'; 
@@ -309,10 +648,12 @@ function renderAttachments() {
 }
 
 // --- Param Displays ---
-[tempSlider, stepsSlider].forEach(s => s && s.addEventListener('input', () => {
+[tempSlider, stepsSlider, ctxSlider].forEach(s => s && s.addEventListener('input', () => {
     if (tempVal) tempVal.textContent = parseFloat(tempSlider.value).toFixed(1);
     if (stepsVal) stepsVal.textContent = stepsSlider.value;
+    if (ctxVal && ctxSlider) ctxVal.textContent = ctxSlider.value;
 }));
+if (ctxVal && ctxSlider) ctxVal.textContent = ctxSlider.value;
 
 // --- Agent Tool Definitions ---
 const AGENT_TOOLS = [
@@ -362,6 +703,30 @@ const AGENT_TOOLS = [
             name: "write_file",
             description: "Write content to a file.",
             parameters: { type: "object", properties: { filepath: { type: "string" }, content: { type: "string" } }, required: ["filepath", "content"] }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "edit_file",
+            description: "Search/replace edit in a file (requires active build plan).",
+            parameters: { type: "object", properties: { filepath: { type: "string" }, find: { type: "string" }, replace: { type: "string" } }, required: ["filepath", "find", "replace"] }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "grep_project",
+            description: "Search file contents in the project.",
+            parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "glob_files",
+            description: "Find files by glob pattern.",
+            parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] }
         }
     },
     {
@@ -419,14 +784,6 @@ const AGENT_TOOLS = [
             description: "Send a WhatsApp message.",
             parameters: { type: "object", properties: { number: { type: "string" }, message: { type: "string" } }, required: ["number", "message"] }
         }
-    },
-    {
-        type: "function",
-        function: {
-            name: "memory_purge",
-            description: "Request the system to immediately free up unused RAM/VRAM. Use this if you are performing a very large task (like building an entire app) and feel that system resources are becoming congested. This will prune older history and trigger garbage collection.",
-            parameters: { type: "object", properties: { reason: { type: "string", description: "The reason for the purge." } }, required: ["reason"] }
-        }
     }
 ];
 
@@ -468,11 +825,12 @@ async function updateMemoryCount() {
     }
 }
 
-async function saveToMemory(text) {
+async function saveToMemory(text, metadata = {}) {
     if (!memoryToggle.checked || !text) return { error: "Memory disabled" };
     memoryIndicator.style.display = 'block';
-    const res = await window.api.invoke('mem-store', { text });
+    const res = await window.api.invoke('mem-store', { text, metadata });
     setTimeout(() => { memoryIndicator.style.display = 'none'; }, 2000);
+    if (res?.success) updateMemoryCount();
     return res;
 }
 
@@ -489,6 +847,7 @@ if (clearBtn) {
         await window.api.invoke('mem-clear');
         chatHistory = [];
         messagesContainer.innerHTML = '<div class="message bot-message"><strong>SYSTEM:</strong> Neural memory wiped.</div>';
+        updateEmptyState();
         updateMemoryCount();
     });
 }
@@ -760,10 +1119,10 @@ async function init() {
             }
         } catch (e) {}
 
-        const systemPrompt = `You are Xkaliber Agent v39.4, a conversational AI assistant (AMD Optimized). You have access to persistent vector memory, web search, and system tools. Respond naturally and conversationally to the user. Do not invoke tools for casual conversation or greetings.
+        const systemPrompt = `You are Xkaliber Agent v40.2, a conversational AI assistant (AMD Optimized). You have access to persistent vector memory, web search, and system tools. Respond naturally and conversationally to the user. Do not invoke tools for casual conversation or greetings.
 
         GUARD RAILS:
-        1. SECURE ACCESS: This version (v39.4) includes secure login and account creation. Access is restricted to authorized users only.
+        1. SECURE ACCESS: This version (v40.2) includes secure login and account creation. Access is restricted to authorized users only.
 2. STRICT ACTION LIMITS: Never use file modification tools unless explicitly requested by the user. If the user asks to download a file, ALWAYS use the provide_file_download_link tool. 
 3. NO UNPROMPTED SETUP: Do not set up configuration files or scripts unprompted. If you are asked to read or list files, do not follow up with write actions. 
 4. PREVENT HALLUCINATIONS: If you are unsure of the user's intent or lack context, DO NOT guess or hallucinate a tool call. Instead, ask the user for clarification.
@@ -779,16 +1138,32 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
 - If the user says something trivial, just chat with them normally and DO NOT use the memory tool.${envContext}`;
 
         if (!chatHistory || chatHistory.length === 0) {
-            chatHistory = [{ role: "system", content: baseSystemPrompt }];
+            chatHistory = [{ role: "system", content: systemPrompt }];
         } else if (chatHistory.length > 0 && chatHistory[0].role === 'system') {
-            chatHistory[0].content = baseSystemPrompt;
+            chatHistory[0].content = systemPrompt;
         }
 
         if (chatHistory.length > 0) {
             messagesContainer.innerHTML = '';
             renderHistory();
         }
+        updateEmptyState();
         updateMemoryCount();
+
+        const activePlans = await window.api.invoke('plan-list-active');
+        if (activePlans?.length && resumeBanner) {
+            const p = activePlans.find(x => x.status === 'executing') || activePlans[0];
+            const full = await window.api.invoke('plan-load', p.id);
+            if (!full.error) {
+                activePlan = full;
+                updateBuildModeUI();
+                if (buildModeUi && isBuildModeEnabled()) buildModeUi.style.display = 'block';
+            }
+        }
+
+        updateBuildModeUI();
+
+        syncBuildLock();
 
     } catch (err) {
         setStatus(false, 'OFFLINE');
@@ -806,6 +1181,7 @@ async function fetchModels(retries = 3) {
         const models = data.data || data; 
         if (Array.isArray(models)) {
             modelSelect.innerHTML = models.map(m => `<option value="${m.id || m}">${m.id || m}</option>`).join('');
+            syncModelSelectsFromMain();
         } else {
             throw new Error('Unexpected models format');
         }
@@ -938,7 +1314,114 @@ function addMessage(role, text) {
     div.innerHTML = role === 'user' ? text : window.markedParse(text);
     messagesContainer.appendChild(div);
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    updateEmptyState();
     return div;
+}
+
+// Show the onboarding empty state only while the chat has no content yet.
+function updateEmptyState() {
+    const empty = document.getElementById('empty-state');
+    if (!empty) return;
+    const hasContent = messagesContainer.querySelector('.message, .agent-log, .search-results-log');
+    empty.style.display = hasContent ? 'none' : 'flex';
+}
+
+// ---------------------------------------------------------------------------
+// Activity timeline: each agent tool call renders a live row that starts in a
+// "running" state and is updated in place with its result (✓/✗ + collapsible
+// output) once the harness reports back via onToolResult. Rows are grouped under
+// per-step headers so the timeline reads as a build log, not a JSON dump.
+// ---------------------------------------------------------------------------
+const toolActivityEls = new Map();
+let lastTimelineStepId = null;
+
+function resetTimelineState() {
+    toolActivityEls.clear();
+    lastTimelineStepId = null;
+}
+
+function escapeTimelineHtml(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+// One-line, human-readable summary of tool args for the row header.
+function compactToolArgs(args) {
+    if (!args || typeof args !== 'object') return '';
+    const preferred = args.filepath || args.path || args.command || args.query || args.pattern || args.reason || args.result;
+    if (typeof preferred === 'string') return preferred.length > 80 ? preferred.slice(0, 80) + '…' : preferred;
+    const json = (() => { try { return JSON.stringify(args); } catch (e) { return ''; } })();
+    return json.length > 80 ? json.slice(0, 80) + '…' : json;
+}
+
+// Failure heuristic: tool results are strings; harness errors begin with a known marker.
+function toolResultIsFailure(result) {
+    return /^\s*(Error|\[BLOCKED|Cannot |\[VERIFY FAILED|\[SYNTAX|\[UNVERIFIED|No match|Tool ")/i.test(String(result || ''));
+}
+
+function nowClock() {
+    const d = new Date();
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+}
+
+// Insert a step divider into the timeline when the active step changes.
+function maybeInsertStepHeader(anchor) {
+    if (!activePlan) return;
+    const sid = activePlan.currentStepId;
+    if (!sid || sid === lastTimelineStepId) return;
+    lastTimelineStepId = sid;
+    const step = (activePlan.steps || []).find(s => s.id === sid);
+    const total = (activePlan.steps || []).length;
+    const hdr = document.createElement('div');
+    hdr.className = 'agent-step-header';
+    hdr.textContent = `STEP ${sid}/${total}${step ? ' — ' + step.title : ''}`;
+    if (anchor && anchor.parentNode === messagesContainer) messagesContainer.insertBefore(hdr, anchor);
+    else messagesContainer.appendChild(hdr);
+}
+
+function appendToolActivity(anchor, name, args, id) {
+    maybeInsertStepHeader(anchor);
+    const el = document.createElement('div');
+    el.className = 'agent-log running';
+    el.innerHTML =
+        `<div class="agent-log-head">` +
+        `<span class="agent-log-status">●</span>` +
+        `<span class="agent-log-name">${escapeTimelineHtml(name)}</span>` +
+        `<span class="agent-log-args">${escapeTimelineHtml(compactToolArgs(args))}</span>` +
+        `<span class="agent-log-time">${nowClock()}</span>` +
+        `</div>`;
+    if (anchor && anchor.parentNode === messagesContainer) messagesContainer.insertBefore(el, anchor);
+    else messagesContainer.appendChild(el);
+    if (id != null) toolActivityEls.set(id, el);
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    updateEmptyState();
+    return el;
+}
+
+function updateToolActivity(id, name, result) {
+    const el = id != null ? toolActivityEls.get(id) : null;
+    if (!el) return;
+    const failed = toolResultIsFailure(result);
+    el.classList.remove('running');
+    el.classList.add(failed ? 'fail' : 'ok');
+    const statusEl = el.querySelector('.agent-log-status');
+    if (statusEl) statusEl.textContent = failed ? '✗' : '✓';
+    const resStr = String(result == null ? '' : result).trim();
+    if (resStr) {
+        const det = document.createElement('details');
+        det.className = 'agent-log-result';
+        const sum = document.createElement('summary');
+        const firstLine = resStr.split('\n')[0];
+        sum.textContent = firstLine.length > 120 ? firstLine.slice(0, 120) + '…' : firstLine;
+        const pre = document.createElement('pre');
+        pre.textContent = resStr.length > 4000 ? resStr.slice(0, 4000) + '\n…[truncated]' : resStr;
+        det.appendChild(sum);
+        det.appendChild(pre);
+        el.appendChild(det);
+    }
+    if (id != null) toolActivityEls.delete(id);
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
 
 function renderHistory() {
@@ -954,6 +1437,7 @@ function renderHistory() {
             });
         }
     });
+    updateEmptyState();
 }
 
 // --- Tool executor (agent mode) ---
@@ -987,10 +1471,19 @@ async function executeTool(name, args) {
         const res = await window.api.invoke('agent-send-input', args.job_id, args.input);
         return res.success ? "Input sent successfully." : `Error: ${res.error}`;
     }
-    if (name === 'read_file') return (await window.api.invoke('agent-read-file', args.filepath)).content || "Error reading";
-    if (name === 'write_file') return (await window.api.invoke('agent-write-file', args.filepath, args.content)).success ? "Success" : "Error";
-    if (name === 'list_directory') return (await window.api.invoke('agent-list-directory', args.dirpath)).files || "Error";
-    if (name === 'delete_file') return (await window.api.invoke('agent-delete-file', args.filepath)).success ? "Success" : "Error";
+    if (name === 'read_file') {
+        const fp = args.filepath || args.file || args.path;
+        const res = await window.api.invoke('agent-read-file', fp, args.start, args.end);
+        if (res.error) return `Error: ${res.error}`;
+        return res.content || "Error reading";
+    }
+    if (name === 'write_file') {
+        const fp = args.filepath || args.file || args.path;
+        const co = args.content ?? args.text ?? args.code ?? '';
+        return (await window.api.invoke('agent-write-file', fp, co)).success ? "Success" : "Error";
+    }
+    if (name === 'list_directory') return (await window.api.invoke('agent-list-directory', args.dirpath || args.path || '.')).files || "Error";
+    if (name === 'delete_file') return (await window.api.invoke('agent-delete-file', args.filepath || args.path)).success ? "Success" : "Error";
     if (name === 'mem_store' || name === 'save_new_user_fact_only') {
         const factToStore = args.exact_new_fact || args.new_fact || args.text;
         const res = await saveToMemory(factToStore);
@@ -1022,18 +1515,230 @@ async function executeTool(name, args) {
         return `I have generated the download link. Provide this exact markdown to the user: [Download ${fileName}](/download_remote?file=${encodedPath})`;
     }
 
-    if (name === 'memory_purge') {
-        console.log(`Model requested memory purge. Reason: ${args.reason}`);
-        // Memory purge request handled contextually, no longer wipes UI history
-        const model = modelSelect.value;
-        if (model) await pageOutModel(model);
-        return "Success: Resource optimization triggered. Model paged out to refresh VRAM. Context will be strictly managed on next turn.";
+    if (name === 'grep_project') {
+        const res = await window.api.invoke('agent-grep', { pattern: args.pattern, path: args.path, glob: args.glob });
+        if (res.error) return `Error: ${res.error}`;
+        return (res.hits || []).map(h => `${h.file}:${h.line}: ${h.text}`).join('\n') || 'No matches';
     }
-    return `Unknown tool: ${name}`;
+    if (name === 'glob_files') {
+        const res = await window.api.invoke('agent-glob', { pattern: args.pattern });
+        return (res.files || []).join('\n') || 'No files';
+    }
+    if (name === 'get_repo_map') {
+        const res = await window.api.invoke('agent-get-repo-map', {});
+        return res.map || res.error || '';
+    }
+    if (name === 'edit_file' && activePlan) {
+        const fp = args.filepath || args.file || args.path;
+        const fi = args.find ?? args.search ?? args.old_string;
+        const re = args.replace ?? args.new_string ?? args.text ?? args.code;
+        const res = await window.api.invoke('edit-apply', {
+            planId: activePlan.id,
+            filepath: fp,
+            find: fi,
+            replace: re
+        });
+        return res.error ? `Error: ${res.error}` : 'Success';
+    }
+
+    return `Unknown tool: ${name}. Available tools: read_file, write_file, edit_file, grep_project, glob_files, list_directory, run_shell_command, memory_search, save_new_user_fact_only, web_search`;
 }
 
 function stripMarkdown(text) {
     return text.replace(/[#*`_~\[\]()>]/g, '');
+}
+
+// Build a throttled, CHEAP streaming renderer for an agent task's bot bubble.
+// Per-token markdown+highlight of the whole growing buffer froze the UI (O(n^2),
+// worst with small models that stream tool calls as plain text). During streaming
+// we now show a capped plain-text tail (no markdown/highlight, O(1) per paint),
+// throttled to ~10fps; the full formatted result is rendered once at the end.
+function makeAgentDeltaRenderer(botDiv) {
+    const throttle = (window.createThrottledRenderer || ((fn) => { const f = (...a) => fn(...a); f.cancel = () => {}; f.flush = () => {}; return f; }));
+    return throttle((text, turn) => {
+        const preview = (text || '').slice(-1500);
+        botDiv.textContent = '';
+        const pulse = document.createElement('span');
+        pulse.className = 'loading-pulse';
+        pulse.textContent = turn ? `Step ${turn}… ` : 'Working… ';
+        const pre = document.createElement('span');
+        pre.style.whiteSpace = 'pre-wrap';
+        pre.style.opacity = '0.75';
+        pre.textContent = preview;
+        botDiv.appendChild(pulse);
+        botDiv.appendChild(document.createElement('br'));
+        botDiv.appendChild(pre);
+    }, 100);
+}
+
+async function runResumedAgentTask(plan) {
+    if (isSending || !window.XKAgentLoop) return;
+    isSending = true;
+    abortController = new AbortController();
+    stopBtn.style.display = 'block';
+
+    const botDiv = addMessage('bot', '');
+    botDiv.innerHTML = '<span class="loading-pulse">Resuming task...</span>';
+    resetTimelineState();
+    const renderDelta = makeAgentDeltaRenderer(botDiv);
+    activePlan = plan;
+    syncBuildLock();
+    renderPlanPanel(plan, 'executing');
+
+    let envContext = '';
+    try {
+        const envInfo = await window.api.invoke('get-env-info');
+        if (envInfo && !envInfo.error) {
+            const root = envInfo.projectRoot || envInfo.cwd;
+            envContext = `\nOS: ${envInfo.platform} (${envInfo.arch})\nPROJECT ROOT: ${root}\nAll file and shell operations must stay inside this project root.\n`;
+        }
+    } catch (e) {}
+
+    try {
+        const ctx = {
+            api: window.api,
+            plan,
+            userGoal: plan.goal,
+            model: modelSelect.value,
+            currentApiBase,
+            numCtx: parseInt(ctxSlider?.value || '8192', 10),
+            temperature: parseFloat(tempSlider?.value || '0.7'),
+            maxSteps: parseInt(stepsSlider?.value || '100', 10),
+            abortSignal: abortController.signal,
+            memoryToggle,
+            sudoInput,
+            saveToMemory,
+            searchMemory,
+            envContext,
+            chatHistory,
+            uplinkMode: uplinkMode.checked,
+            ui: planUI,            onStepUpdate: (p, step) => planUI.onStepUpdate(p, step),
+            onStepAdvance: (p) => planUI.onStepAdvance(p),
+            onPlanBlocked: (p, reason) => planUI.onPlanBlocked(p, reason),
+            onReview: (p, diff, gitLines) => planUI.onReview(p, diff, gitLines),
+            onDelta: (text, turn) => renderDelta(text, turn),
+            onToolCall: (name, args, id) => appendToolActivity(botDiv, name, args, id),
+            onToolResult: (name, result, id) => updateToolActivity(id, name, result),
+            onMessage: (text) => { renderDelta.cancel(); botDiv.innerHTML = window.markedParse(text); }
+        };
+        buildAgentCtxExtras(ctx);
+        window._activeAgentCtx = ctx;
+
+        // C5: a resumed plan may still be awaiting approval (the startup restore can
+        // surface one). Run the approval gate first — runExecutionPhase's loop only
+        // runs while status is 'executing', so resuming an unapproved plan would
+        // otherwise do nothing.
+        if (plan.status === 'awaiting_approval') {
+            plan = await window.XKAgentLoop.waitForApproval(plan, planUI);
+            ctx.plan = plan;
+            activePlan = plan;
+        }
+
+        await window.XKAgentLoop.runExecutionPhase(ctx);
+        if (plan.status === 'done') {
+            if (memoryToggle?.checked) {
+                const summary = `Project: ${plan.goal}. Files: ${Object.keys(plan.filesLedger || {}).join(', ')}`;
+                await saveToMemory(summary, { type: 'project_memory', planId: plan.id });
+            }
+            await window.XKAgentLoop.runReviewPhase(plan, ctx);
+            renderDelta.cancel();
+            botDiv.innerHTML = window.markedParse(`Task complete: **${plan.goal}**`);
+        }
+    } catch (e) {
+        renderDelta.cancel();
+        botDiv.innerHTML = `<span style="color:#ff4444">Error: ${e.message}</span>`;
+    } finally {
+        renderDelta.cancel();
+        isSending = false;
+        stopBtn.style.display = 'none';
+        abortController = null;
+        window._activeAgentCtx = null;
+        syncBuildLock();
+        // Surface the resume/cancel banner for any plan left incomplete (e.g. after
+        // Stop), so the user always has a one-click way to resume OR cancel it.
+        updateBuildModeUI();
+    }
+}
+
+async function runPlanAgentTask(userGoal, botDiv) {
+    // Guard: never let the agent silently plan against its own install folder.
+    // A workspace must be selected via "Here I am" first.
+    let rootCheck = null;
+    try { rootCheck = await window.api.invoke('project-get-root'); } catch (e) {}
+    if (!rootCheck || !rootCheck.projectRoot) {
+        const msg = '⚠️ **No workspace selected.** Click **📍 Here I am** and pick the folder you want the agent to build in, then start the task again. (Otherwise the agent would operate on its own app folder.)';
+        botDiv.innerHTML = window.markedParse(msg);
+        chatHistory.push({ role: 'assistant', content: msg });
+        window.api.invoke('save-history', chatHistory);
+        return { phase: 'planning_failed', content: msg };
+    }
+
+    let envContext = '';
+    try {
+        const envInfo = await window.api.invoke('get-env-info');
+        if (envInfo && !envInfo.error) {
+            const root = envInfo.projectRoot || envInfo.cwd;
+            envContext = `\nOS: ${envInfo.platform} (${envInfo.arch})\nPROJECT ROOT: ${root}\nAll file and shell operations must stay inside this project root.\n`;
+        }
+    } catch (e) {}
+
+    resetTimelineState();
+    const renderDelta = makeAgentDeltaRenderer(botDiv);
+    const ctx = {
+        api: window.api,
+        plan: null,
+        userGoal,
+        model: modelSelect.value,
+        currentApiBase,
+        numCtx: parseInt(ctxSlider?.value || '8192', 10),
+        temperature: parseFloat(tempSlider?.value || '0.7'),
+        maxSteps: parseInt(stepsSlider?.value || '100', 10),
+        abortSignal: abortController.signal,
+        memoryToggle,
+        sudoInput,
+        saveToMemory,
+        searchMemory,
+        envContext,
+        chatHistory,
+        uplinkMode: uplinkMode.checked,
+        ui: planUI,        onPlanCreated: (plan) => {
+            activePlan = plan;
+            syncBuildLock();
+            fillPlanMetaUI(plan);
+            renderPlanPanel(plan, 'approval');
+            addMessage('system', `**Plan ready for approval:** ${plan.goal} (${plan.steps.length} steps)`);
+        },
+        onStepUpdate: (plan, step) => planUI.onStepUpdate(plan, step),
+        onStepAdvance: (plan) => planUI.onStepAdvance(plan),
+        onPlanBlocked: (plan, reason) => planUI.onPlanBlocked(plan, reason),
+        onReview: (plan, diff, gitLines) => planUI.onReview(plan, diff, gitLines),
+        onDelta: (text, turn) => renderDelta(text, turn),
+        onToolCall: (name, args, id) => appendToolActivity(botDiv, name, args, id),
+        onToolResult: (name, result, id) => updateToolActivity(id, name, result),
+        onMessage: (text) => { renderDelta.cancel(); botDiv.innerHTML = window.markedParse(text); }
+    };
+    buildAgentCtxExtras(ctx);
+    window._activeAgentCtx = ctx;
+
+    const result = await window.XKAgentLoop.runAgentTask(ctx);
+    renderDelta.cancel();
+    if (result.phase === 'planning_failed') {
+        const msg = result.content || 'Could not create a build plan. Describe a specific coding task (files, stack, goal).';
+        botDiv.innerHTML = window.markedParse(msg);
+        chatHistory.push({ role: 'assistant', content: msg });
+        window.api.invoke('save-history', chatHistory);
+        syncBuildLock();
+        return result;
+    }
+    if (result.plan?.status === 'done') {
+        const completionMsg = `✅ **All Plan Steps Completed!**\n\nI have successfully finished executing all steps in the build plan for:\n*${result.plan.goal}*\n\nPlease review the final results.`;
+        botDiv.innerHTML = window.markedParse(completionMsg);
+        chatHistory.push({ role: 'assistant', content: completionMsg });
+        window.api.invoke('save-history', chatHistory);
+    } else if (result.content) {
+        botDiv.innerHTML = window.markedParse(result.content);
+    }
+    return result;
 }
 
 let currentResourceStatus = 'healthy';
@@ -1051,136 +1756,8 @@ window.api.on('resource-update', (data) => {
     }
 });
 
-function pruneChatHistory(historyArray, forceAggressive = false, currentTurnCount = 0) {
-    const memorySaverEnabled = document.getElementById('memory-saver-toggle')?.checked;
-    const isActuallyCongested = currentResourceStatus === 'congested';
-    
-    // Adaptive limits based on resource pressure
-    let MAX_LENGTH = 30;
-    let TRIM_THRESHOLD = 8000;
-
-    // ULTRA-AGGRESSIVE PRUNING for active autonomous loops (turnCount > 1)
-    // We only need the system prompt, original task, plan, and immediate last step.
-    const isDeepLoop = currentTurnCount > 1;
-
-    if (isActuallyCongested || forceAggressive || isDeepLoop) {
-        MAX_LENGTH = isDeepLoop ? 6 : 12; // Keep loop history extremely tight
-        TRIM_THRESHOLD = isDeepLoop ? 1500 : 3000; // Aggressive truncation
-    } else if (currentResourceStatus === 'warning') {
-        MAX_LENGTH = 20;
-        TRIM_THRESHOLD = 5000;
-    }
-
-    // --- LM STUDIO STRICT CONTEXT ENFORCEMENT ---
-    const ctxLimitTokens = 131072; // Default to max since LM Studio handles it, but we need a cap for pruning.
-    // Leave 45% for generation! Writing large files (like games) requires huge output limits.
-    const allowedPromptTokens = Math.floor(ctxLimitTokens * 0.55); 
-    const MAX_ALLOWED_CHARS = allowedPromptTokens * 3.5; // Approx 3.5 chars per token
-    const needsStrictContextEnforcement = uplinkMode.checked || memorySaverEnabled || forceAggressive || isActuallyCongested || isDeepLoop;
-
-    console.log(`Resource Manager: Checking history (status: ${currentResourceStatus}, loop: ${currentTurnCount}, current: ${historyArray.length} msgs)`);
-
-    // 0. Identify critical messages that should NEVER be pruned if possible
-    let taskIndex = -1;
-    let planIndex = -1;
-
-    for (let i = historyArray.length - 1; i >= 0; i--) {
-        const m = historyArray[i];
-        if (taskIndex === -1 && m.role === 'user') taskIndex = i;
-        if (planIndex === -1 && m.tool_calls && m.tool_calls.some(tc => tc.function.name === 'task_begin')) planIndex = i;
-    }
-
-    // 1. Trim extremely large messages in history (except critical ones and the very last turn)
-    if (needsStrictContextEnforcement) {
-        historyArray.forEach((msg, idx) => {
-            // Always protect the system prompt (idx 0), task definition, formal plan, and the very last turn
-            const isCritical = idx === 0 || idx === taskIndex || idx === planIndex || idx === planIndex + 1 || idx >= historyArray.length - 2;
-            if (!isCritical) { 
-                if (msg.content && msg.content.length > TRIM_THRESHOLD) {
-                    console.log(`Resource Manager: Trimming large message at index ${idx} (${msg.content.length} chars)`);
-                    const keepSize = isActuallyCongested ? TRIM_THRESHOLD / 4 : TRIM_THRESHOLD / 2;
-                    msg.content = msg.content.substring(0, keepSize) + 
-                                  "\n\n... [TRUNCATED BY RESOURCE GUARD TO PRESERVE TASK CONTEXT] ...\n\n" + 
-                                  msg.content.slice(- (keepSize / 2));
-                }
-            }
-        });
-    }
-
-    // 2. Reduce history size if it exceeds MAX_LENGTH, preserving critical task flow
-    if (needsStrictContextEnforcement && historyArray.length > MAX_LENGTH) {
-        console.log(`Resource Manager: Pruning history from ${historyArray.length} to ${MAX_LENGTH} messages (Task-Aware).`);
-        const systemPrompt = historyArray[0];
-        const criticalIndices = new Set([0, taskIndex, planIndex, planIndex + 1].filter(idx => idx !== -1 && idx < historyArray.length));
-        
-        // Take as many recent messages as fit after critical ones
-        const recentMessages = [];
-        for (let i = historyArray.length - 1; i >= 0; i--) {
-            if (recentMessages.length >= (MAX_LENGTH - criticalIndices.size)) break;
-            if (!criticalIndices.has(i)) {
-                recentMessages.unshift(historyArray[i]);
-            }
-        }
-        
-        const finalHistory = [systemPrompt];
-        if (taskIndex !== -1 && taskIndex !== 0) finalHistory.push(historyArray[taskIndex]);
-        if (planIndex !== -1 && planIndex !== 0 && planIndex !== taskIndex) {
-            finalHistory.push(historyArray[planIndex]);
-            if (planIndex + 1 < historyArray.length) finalHistory.push(historyArray[planIndex + 1]);
-        }
-        
-        // Add recent ones that aren't already there
-        recentMessages.forEach(m => {
-            if (!finalHistory.includes(m)) finalHistory.push(m);
-        });
-        
-        // Re-sort by original temporal order if needed, but here we just want a valid flow
-        historyArray = finalHistory.sort((a, b) => historyArray.indexOf(a) - historyArray.indexOf(b));
-    }
-
-    // 3. Strict Payload Character Limit Enforcement (Prevents LM Studio Thrashing)
-    if (uplinkMode.checked) {
-        let currentChars = historyArray.reduce((acc, msg) => acc + (msg.content ? msg.content.length : 0), 0);
-        if (currentChars > MAX_ALLOWED_CHARS) {
-            console.warn(`[CONTEXT GUARD] Payload size (${currentChars} chars) exceeds optimal context window (${MAX_ALLOWED_CHARS} chars). Aggressively pruning intermediate messages...`);
-            
-            // Drop older intermediate messages until we fit, protecting system, task, and last turn
-            while (currentChars > MAX_ALLOWED_CHARS && historyArray.length > 3) {
-                let pruneIdx = 1;
-                // Protect Task (idx 1) and Plan (idx 2) if they exist
-                if (historyArray.length > 5) {
-                    if (pruneIdx === 1) pruneIdx = 2; // Skip task
-                    if (pruneIdx === 2 && planIndex !== -1) pruneIdx = 3; // Skip plan
-                }
-                
-                if (pruneIdx >= historyArray.length - 1) pruneIdx = 1; // Fallback
-
-                const removed = historyArray.splice(pruneIdx, 1)[0];
-                currentChars -= (removed.content ? removed.content.length : 0);
-            }
-            
-            // If it's still too big (e.g. the final prompt itself is massive), forcefully truncate the last messages
-            if (currentChars > MAX_ALLOWED_CHARS) {
-                const targetChars = MAX_ALLOWED_CHARS * 0.5; 
-                while (currentChars > targetChars && historyArray.length > 4) {
-                    const removed = historyArray.splice(1, 1)[0];
-                    currentChars -= (removed.content ? removed.content.length : 0);
-                }
-                
-                // Final emergency truncation of individual messages
-                for (let i = historyArray.length - 1; i > 0; i--) {
-                    if (currentChars <= MAX_ALLOWED_CHARS) break;
-                    if (historyArray[i].content && historyArray[i].content.length > 1000) {
-                        const overage = currentChars - MAX_ALLOWED_CHARS;
-                        const newLength = Math.max(500, historyArray[i].content.length - overage);
-                        historyArray[i].content = historyArray[i].content.substring(0, newLength) + "\n...[TRUNCATED]";
-                        currentChars = historyArray.reduce((acc, msg) => acc + (msg.content ? msg.content.length : 0), 0);
-                    }
-                }
-            }
-        }
-    }
-    
+// Context is rebuilt from Plan state in agent mode; chat mode keeps full history.
+function pruneChatHistory(historyArray) {
     return historyArray;
 }
 
@@ -1198,19 +1775,50 @@ let isSending = false;
 stopBtn.addEventListener('click', () => {
     if (abortController) {
         abortController.abort();
-        addMessage('system', 'Neural link terminated.');
+        addMessage('system', 'Neural link terminated. The plan is paused — RESUME or CANCEL it from the sidebar.');
     }
+    // Reveal the resume/cancel banner right away, even before the loop's cleanup
+    // settles, so a paused plan can always be cancelled (never traps Build Mode).
+    updateBuildModeUI();
 });
 
 async function sendMessage() {
-    if (isSending) return;
-    
+    let text = userInput.value.trim();
+    if (!text) return;
+
+    // Plugin slash-command expansion (e.g. "/greet Ada" -> injected prompt text).
+    // Desktop only; resolves against enabled plugin commands in the main process.
+    if (!isSending && text[0] === '/' && !isWebMode && window.api) {
+        const expanded = await resolvePluginCommand(text);
+        if (expanded != null) text = expanded;
+    }
+    // Fire-and-forget onMessageSend hook so plugins can observe/log user input.
+    if (!isWebMode && window.api) {
+        try { window.api.invoke('plugin-fire-hook', { hookEvent: 'onMessageSend', payload: { text } }); } catch (e) {}
+    }
+
+    if (isSending) {
+        // Agent is currently busy running a loop or waiting. Inject user input as a hint.
+        userInput.value = '';
+        userInput.style.height = 'auto';
+        userInput.blur();
+        setTimeout(() => { userInput.value = ''; }, 10);
+
+        addMessage('user', text);
+        chatHistory.push({ role: 'user', content: "User Hint: " + text });
+        window.api.invoke('save-history', chatHistory);
+
+        // Inject directly into the active build mode loop if running
+        if (window._activeAgentCtx) {
+            if (!window._activeAgentCtx.unprocessedHints) window._activeAgentCtx.unprocessedHints = [];
+            window._activeAgentCtx.unprocessedHints.push(text);
+        }
+        return;
+    }
+
     const trace = new PipelineTrace(null, null, `req_${Date.now()}`);
     trace.addStep('input.received', 'input', 'ok', 'INPUT_OK', 0);
-    
-    const text = userInput.value.trim();
-    if (!text) return;
-    
+
     const model = modelSelect.value;
     if (!model || model === "Scanning...") {
         trace.addStep('routing.selected_capability', 'routing', 'error', 'NO_MODEL', 0, 'No model selected');
@@ -1221,17 +1829,13 @@ async function sendMessage() {
 
     isSending = true;
     userInput.value = '';
-    userInput.disabled = true;
-    sendBtn.disabled = true;
-    
+
     // Mobile reliable clear: force blur and small delay
     userInput.blur();
     setTimeout(() => { userInput.value = ''; }, 10);
-    
-    abortController = new AbortController();
-    sendBtn.style.display = 'none';
-    stopBtn.style.display = 'block';
 
+    abortController = new AbortController();
+    stopBtn.style.display = 'block';
     let finalPrompt = text;
     let images = [];
 
@@ -1264,8 +1868,9 @@ async function sendMessage() {
     }
 
     const agentEnabled = document.getElementById('agent-toggle')?.checked;
+    const buildModeEnabled = isBuildModeEnabled();
 
-    if (netrunnerToggle?.checked && !agentEnabled) {
+    if (netrunnerToggle?.checked && !agentEnabled && !buildModeEnabled) {
         try {
             const searchResults = await window.api.invoke('perform-search', text);
             if (searchResults && !searchResults.error && searchResults.length > 0) {
@@ -1326,7 +1931,23 @@ CRITICAL RULES:
     }
 
     try {
-        // SPEED OPTIMIZATION: Check if system prompt exists, otherwise create it with stronger memory directives
+        window.api.invoke('save-history', chatHistory);
+
+        if (buildModeEnabled && window.XKAgentLoop) {
+            await runPlanAgentTask(finalPrompt, botDiv);
+            trace.close();
+            return;
+        }
+
+        // C3: BUILD MODE is on but the plan engine failed to load. Don't silently
+        // fall through to ordinary chat — the user expects planning. Surface it.
+        if (buildModeEnabled && !window.XKAgentLoop) {
+            botDiv.innerHTML = window.markedParse('**Build Mode unavailable:** the plan engine (`agentLoop.js`) did not load. Reload the app; if it persists, check the console for a load error. Falling back to chat is disabled to avoid confusion.');
+            trace.close();
+            return;
+        }
+
+        // --- Chat path (Build Mode off): conversational, optional Agent tools ---
         if (!chatHistory || chatHistory.length === 0 || chatHistory[0].role !== 'system') {
             let envContext = "";
             try {
@@ -1336,7 +1957,7 @@ CRITICAL RULES:
                 }
             } catch (e) {}
             
-            const systemPrompt = `You are Xkaliber Agent v39.4, a conversational AI assistant (AMD Optimized). You have access to persistent vector memory, web search, and system tools. Respond naturally and conversationally to the user. Do not invoke tools for casual conversation or greetings.
+            const systemPrompt = `You are Xkaliber Agent v40.2, a conversational AI assistant (AMD Optimized). You have access to persistent vector memory, web search, and system tools. Respond naturally and conversationally to the user. Do not invoke tools for casual conversation or greetings.
 
 AUTONOMOUS WORKFLOW:
 You support a 'Plan-Execute-Verify' loop. For complex requests (especially file system tasks):
@@ -1348,7 +1969,7 @@ You support a 'Plan-Execute-Verify' loop. For complex requests (especially file 
 CRITICAL: If you are asked to modify, create, or read files, you MUST use the provided tools (write_file, read_file, run_shell_command) immediately. Do not hesitate.
 
 GUARD RAILS:
-1. SECURE ACCESS: This version (v39.4) includes secure login and account creation. Access is restricted to authorized users only.
+1. SECURE ACCESS: This version (v40.2) includes secure login and account creation. Access is restricted to authorized users only.
 2. STRICT ACTION LIMITS: Never use file modification tools unless explicitly requested by the user. If the user asks to download a file, ALWAYS use the provide_file_download_link tool. 
 3. NO UNPROMPTED SETUP: Do not set up configuration files or scripts unprompted. If you are asked to read or list files, do not follow up with write actions. 
 4. PREVENT HALLUCINATIONS: If you are unsure of the user's intent or lack context, DO NOT guess or hallucinate a tool call. Instead, ask the user for clarification.
@@ -1371,37 +1992,6 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
         // we can safely clone it into payloadHistory so the AI actually sees the instruction.
         let payloadHistory = JSON.parse(JSON.stringify(chatHistory));
 
-        // TASK ISOLATION (v37.5/v38.1): To prevent context bloating and VRAM exhaustion during heavy coding tasks,
-        // we proactively flush older chat history from the model's memory if Resource Saver is ON or system is congested.
-        const memorySaverEnabled = document.getElementById('memory-saver-toggle')?.checked;
-        const isActuallyCongested = currentResourceStatus === 'congested';
-        
-        if (memorySaverEnabled || isActuallyCongested) {
-            console.log(`[RESOURCE GUARD] Task Isolation triggered (${isActuallyCongested ? 'CONGESTED' : 'MANUAL'}). Flushing previous conversational context.`);
-            if (payloadHistory && payloadHistory.length > 0 && payloadHistory[0].role === 'system') {
-                const sysPrompt = payloadHistory[0];
-                const lastUserPrompt = payloadHistory[payloadHistory.length - 1]; // The prompt we just added
-                
-                // Identify the ORIGINAL task if it's different from the last user prompt
-                // This ensures the agent never forgets what it was originally asked to do.
-                let originalTask = null;
-                for (let i = chatHistory.length - 2; i >= 1; i--) {
-                    if (chatHistory[i].role === 'user') {
-                        originalTask = chatHistory[i];
-                        break;
-                    }
-                }
-                
-                if (originalTask && originalTask !== lastUserPrompt) {
-                    payloadHistory = [sysPrompt, originalTask, lastUserPrompt];
-                } else {
-                    payloadHistory = [sysPrompt, lastUserPrompt]; 
-                }
-            } else {
-                payloadHistory = [];
-            }
-        }
-
         console.log(`Connecting to Uplink at ${currentApiBase}...`);
         let finished = false;
         let turnCount = 0;
@@ -1413,7 +2003,7 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
             turnCount++;
             
             // RESOURCE OPTIMIZATION: Prune history if needed before each turn, passing turnCount
-            payloadHistory = pruneChatHistory(payloadHistory, false, turnCount);
+            payloadHistory = pruneChatHistory(payloadHistory);
 
             let body, endpoint;
             
@@ -1552,15 +2142,12 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
                     }
                 }
 
-                const memorySaverEnabled = document.getElementById('memory-saver-toggle')?.checked;
-                // Protect the model in VRAM during active generation to prevent it from being flushed
-                // if a tool execution (like compiling) takes longer than the keep_alive timeout.
                 body = {
                     model,
                     messages: messagesForOllama,
                     stream: true,
-                    options: { temperature: parseFloat(tempSlider.value), num_ctx: parseInt(ctxSlider.value) },
-                    keep_alive: -1 // Keep locked in VRAM while the task is ongoing
+                    options: { temperature: parseFloat(tempSlider.value), num_ctx: parseInt(ctxSlider?.value || 8192) },
+                    keep_alive: -1
                 };
                 if (activeTools.length > 0) body.tools = activeTools;
             }
@@ -1727,20 +2314,10 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
 
             if (finishReason === 'length') {
                 console.warn("[GUARD RAIL] Generation cut off due to context limits.");
-                botDiv.innerHTML += `<br><br><span style="color:var(--danger-color); padding: 5px; border: 1px dashed var(--danger-color); border-radius: 4px; display: inline-block; margin-top: 10px; font-size: 0.85rem;"><strong>⚠️ RESOURCE GUARD:</strong> The model hit its context limit during generation. Attempting ultra-aggressive memory wipe to recover and continue...</span>`;
-                
+                botDiv.innerHTML += `<br><br><span style="color:var(--danger-color); font-size: 0.85rem;"><strong>Generation cut off:</strong> Response exceeded context. Try a shorter prompt or increase context window.</span>`;
                 chatHistory.push({ role: 'assistant', content: fullContent });
                 payloadHistory.push({ role: 'assistant', content: fullContent });
-                
-                // Force an ultra-aggressive prune right now to clear up space for the next turn
-                payloadHistory = pruneChatHistory(payloadHistory, true, 99); 
-                
-                // Tell the agent it was cut off so it knows its previous response is incomplete
-                const recoveryMsg = "[SYSTEM ALARM]: Your previous generation was cut off mid-thought because you exceeded the context window limit (max tokens reached). If you were writing a large file, it failed. Please plan a new strategy using smaller chunks, or summarize your progress and stop.";
-                chatHistory.push({ role: 'user', content: recoveryMsg });
-                payloadHistory.push({ role: 'user', content: recoveryMsg });
-                
-                // Continue the loop instead of breaking, giving the agent a chance to recover with a clear context!
+                finished = true;
                 continue;
             }
 
@@ -1889,27 +2466,15 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
         generateReport(trace, explanation, text, "");
         
     } finally {
-        isSending = false; // Release the VRAM paging lock
-        
-        // Now that the task is fully finished, apply the requested memory saving policy
-        const memorySaverEnabled = document.getElementById('memory-saver-toggle')?.checked;
-        if (memorySaverEnabled && !uplinkMode.checked) {
-            const currentModel = modelSelect.value;
-            if (currentModel) {
-                // Background fetch to reset keep_alive to 1m
-                fetch(`${OLLAMA_API}/chat`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ model: currentModel, messages: [], keep_alive: "1m" })
-                }).catch(() => {});
-            }
-        }
-        
+        isSending = false;
+
         sendBtn.style.display = 'block';
         stopBtn.style.display = 'none';
         abortController = null;
-        userInput.disabled = false;
-        sendBtn.disabled = false;
+        window._activeAgentCtx = null; // C2: clear stale ctx (runPlanAgentTask has no finally of its own)
+        syncBuildLock();
+        // Surface the resume/cancel banner for a plan left incomplete by Stop.
+        updateBuildModeUI();
         // Focus back to input on desktop
         if (!isWebMode) userInput.focus();
     }
@@ -1917,6 +2482,25 @@ You have a tool called save_new_user_fact_only. You must be EXTREMELY SELECTIVE 
 
 sendBtn.addEventListener('click', sendMessage);
 userInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
+
+// Onboarding suggestion chips: prefill the input (and flip Build Mode for the
+// "build a project" starter), then focus — never auto-send, since the model may
+// not be connected yet.
+const emptyStateEl = document.getElementById('empty-state');
+if (emptyStateEl) {
+    emptyStateEl.addEventListener('click', (e) => {
+        const chip = e.target.closest('.suggest-chip');
+        if (!chip) return;
+        if (chip.dataset.build === '1') {
+            const t = document.getElementById('build-mode-toggle');
+            if (t && !t.checked) { t.checked = true; t.dispatchEvent(new Event('change')); }
+        }
+        userInput.value = chip.dataset.prompt || '';
+        userInput.focus();
+        try { userInput.dispatchEvent(new Event('input')); } catch (e2) {}
+        userInput.setSelectionRange(userInput.value.length, userInput.value.length);
+    });
+}
 checkAuth();
 
 
@@ -1945,3 +2529,128 @@ document.addEventListener('click', (e) => {
         }
     }
 });
+
+
+// ===========================================================================
+// Plugin system UI (desktop only — installing/enabling plugins from a tunneled
+// phone would be a security hazard, so the panel is hidden in web mode).
+// ===========================================================================
+(function initPluginsUI() {
+    const panel = document.getElementById('plugins-panel');
+    const listEl = document.getElementById('plugin-list');
+    const urlInput = document.getElementById('plugin-install-url');
+    const installBtn = document.getElementById('plugin-install-btn');
+    const statusEl = document.getElementById('plugin-install-status');
+    if (!panel || !listEl) return;
+
+    if (isWebMode || !window.api) { panel.style.display = 'none'; return; }
+
+    const CAP_HINT = {
+        fs: 'read/write files in the project', shell: 'run shell commands',
+        net: 'make network requests', memory: 'read/write vector memory',
+        ui: 'show notifications', log: 'write to the log',
+    };
+
+    function setStatus(msg, isError) {
+        if (!statusEl) return;
+        statusEl.style.display = msg ? 'block' : 'none';
+        statusEl.textContent = msg || '';
+        statusEl.style.color = isError ? '#ff4444' : '#8b949e';
+    }
+
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+    async function refreshPlugins() {
+        let plugins = [];
+        try { plugins = await window.api.invoke('plugins-list'); } catch (e) { return; }
+        if (!plugins.length) { listEl.innerHTML = 'No plugins installed.'; return; }
+
+        listEl.innerHTML = plugins.map(p => {
+            const caps = (p.capabilities || []).join(', ') || 'none';
+            const contrib = `${p.tools.length} tool${p.tools.length === 1 ? '' : 's'}, ${p.commands.length} cmd, ${p.hooks.length} hook`;
+            const err = p.error ? `<div style="color:#ff4444; font-size:0.62rem; margin-top:2px;">⚠ ${esc(p.error)}</div>` : '';
+            return `
+            <div class="plugin-row" data-id="${esc(p.id)}" style="border:1px solid var(--border-color); border-radius:4px; padding:5px; margin-bottom:5px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="color:var(--text-color); font-weight:bold;">${esc(p.name)} <span style="color:#8b949e; font-weight:normal;">v${esc(p.version)}</span></span>
+                    <label class="toggle-label" style="margin:0;">
+                        <input type="checkbox" class="plugin-toggle" ${p.enabled ? 'checked' : ''} ${p.error ? 'disabled' : ''}>
+                    </label>
+                </div>
+                <div style="color:#8b949e; font-size:0.62rem; margin-top:2px;">${esc(p.description || '')}</div>
+                <div style="color:#00e5ff; font-size:0.62rem; margin-top:2px;">caps: ${esc(caps)} · ${esc(contrib)}</div>
+                ${err}
+                <button class="plugin-uninstall clear-btn" style="font-size:0.6rem; padding:2px 6px; margin-top:4px;">UNINSTALL</button>
+            </div>`;
+        }).join('');
+
+        // Wire row controls.
+        listEl.querySelectorAll('.plugin-row').forEach(row => {
+            const id = row.getAttribute('data-id');
+            const p = plugins.find(x => x.id === id);
+            const toggle = row.querySelector('.plugin-toggle');
+            if (toggle) toggle.addEventListener('change', async () => {
+                if (toggle.checked && (p.capabilities || []).length) {
+                    const lines = p.capabilities.map(c => ` • ${c} — ${CAP_HINT[c] || c}`).join('\n');
+                    const ok = confirm(`Enable "${p.name}"?\n\nThis plugin runs trusted code and requests these capabilities:\n${lines}\n\nOnly enable plugins you trust.`);
+                    if (!ok) { toggle.checked = false; return; }
+                }
+                const grantedCaps = toggle.checked ? p.capabilities : [];
+                await window.api.invoke('plugin-set-enabled', { id, enabled: toggle.checked, grantedCaps });
+                refreshPlugins();
+            });
+            const uninstall = row.querySelector('.plugin-uninstall');
+            if (uninstall) uninstall.addEventListener('click', async () => {
+                if (!confirm(`Uninstall "${p.name}"? This deletes its folder.`)) return;
+                await window.api.invoke('plugin-uninstall', { id });
+                refreshPlugins();
+            });
+        });
+    }
+
+    async function resolveAndInstall() {
+        const url = (urlInput.value || '').trim();
+        if (!url) return;
+        setStatus('Installing…');
+        installBtn.disabled = true;
+        try {
+            const res = await window.api.invoke('plugin-install', { url });
+            if (res && res.success) {
+                setStatus(`Installed "${res.id}". Enable it below to grant its capabilities.`);
+                urlInput.value = '';
+                refreshPlugins();
+            } else {
+                setStatus(`Install failed: ${res && res.error ? res.error : 'unknown error'}`, true);
+            }
+        } catch (e) {
+            setStatus(`Install failed: ${e.message || e}`, true);
+        } finally {
+            installBtn.disabled = false;
+        }
+    }
+
+    if (installBtn) installBtn.addEventListener('click', resolveAndInstall);
+    if (urlInput) urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); resolveAndInstall(); } });
+
+    // Surface host.ui.notify() messages from plugins.
+    try {
+        window.api.on('plugin-ui-event', (data) => {
+            if (data && data.message) addMessage('system', `🧩 **${data.pluginId}:** ${data.message}`);
+        });
+    } catch (e) {}
+
+    refreshPlugins();
+})();
+
+// Resolve a "/name args" slash command against enabled plugin commands.
+// Returns the expanded text, or null if it isn't a known plugin command.
+async function resolvePluginCommand(raw) {
+    const m = raw.match(/^\/(\S+)\s*([\s\S]*)$/);
+    if (!m) return null;
+    try {
+        const res = await window.api.invoke('plugin-run-command', { name: m[1], argText: m[2] });
+        return res && typeof res.text === 'string' ? res.text : null;
+    } catch (e) {
+        return null;
+    }
+}

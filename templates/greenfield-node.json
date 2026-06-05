@@ -1,0 +1,14 @@
+{
+  "projectType": "greenfield",
+  "language": "node",
+  "steps": [
+    "Initialize git repository and npm project",
+    "Create core source files and entry point",
+    "Add configuration and README",
+    "Implement main feature logic",
+    "Add tests and verify npm test passes",
+    "Final review and documentation"
+  ],
+  "suggestedTestCmd": "npm test",
+  "suggestedLintCmd": "npm run lint"
+}

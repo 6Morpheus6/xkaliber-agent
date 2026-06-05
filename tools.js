@@ -2,6 +2,9 @@ const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const memoryManager = require('./memory');
+const projectContext = require('./projectContext.js');
+const { grepProject } = require('./lib/grepTool.js');
+const { globFiles } = require('./lib/globTool.js');
 
 const activeProcesses = new Map();
 let nextJobId = 1;
@@ -69,6 +72,22 @@ const AGENT_TOOLS = [
             name: 'write_file',
             description: 'Create or overwrite a file on the host system.',
             parameters: { type: 'object', properties: { filepath: { type: 'string' }, content: { type: 'string' } }, required: ['filepath', 'content'] }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'grep_project',
+            description: 'Search file contents in the project root.',
+            parameters: { type: 'object', properties: { pattern: { type: 'string' } }, required: ['pattern'] }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'glob_files',
+            description: 'Find files by glob pattern under the project root.',
+            parameters: { type: 'object', properties: { pattern: { type: 'string' } }, required: ['pattern'] }
         }
     },
     {
@@ -217,9 +236,44 @@ async function executeTool(name, args) {
     }
     
     if (name === 'memory_search') {
-        const mems = await memoryManager.queryVectors(args.query);
-        return mems.length > 0 ? mems.map(m => m.text).join('
-') : 'No memory found';
+        const res = await memoryManager.queryVectors(args.query);
+        const mems = Array.isArray(res) ? res : (res && res.data) || [];
+        return mems.length > 0 ? mems.map(m => m.text || m).join('\n') : 'No memory found';
+    }
+
+    if (name === 'grep_project') {
+        const root = projectContext.getRootOrNull() || process.cwd();
+        const g = await grepProject(root, args.pattern);
+        if (!g.hits.length) return 'No matches.';
+        return g.hits.slice(0, 40).map(h => `${h.file}:${h.line}: ${h.text}`).join('\n');
+    }
+
+    if (name === 'glob_files') {
+        const root = projectContext.getRootOrNull() || process.cwd();
+        const gl = await globFiles(root, args.pattern);
+        return (gl.files || []).slice(0, 80).join('\n') || 'No files matched.';
+    }
+
+    if (name === 'read_process_log') {
+        const proc = activeProcesses.get(Number(args.job_id));
+        if (!proc) return 'Unknown job id';
+        const lines = args.lines || 50;
+        return truncate(proc.log.slice(-lines).join(''));
+    }
+
+    if (name === 'send_input') {
+        const proc = activeProcesses.get(Number(args.job_id));
+        if (!proc) return 'Unknown job id';
+        proc.process.stdin.write(args.input);
+        return 'Input sent.';
+    }
+
+    if (name === 'delete_file') {
+        try {
+            const p = path.resolve(args.filepath);
+            fs.rmSync(p, { recursive: true, force: true });
+            return 'Deleted.';
+        } catch (e) { return 'Delete error: ' + e.message; }
     }
 
     return 'Tool ' + name + ' executed.';

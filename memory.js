@@ -3,6 +3,16 @@ const path = require('path');
 const os = require('os');
 const { app } = require('electron');
 
+// Drop retrieved memories below this cosine similarity so low-relevance snippets
+// aren't injected into the prompt as authoritative "facts". all-minilm scores run
+// lower than larger models, so this floor is modest; tune via XK_MEM_MIN_SIM.
+const MIN_SIMILARITY = parseFloat(process.env.XK_MEM_MIN_SIM || '0.35');
+
+// Pure helper (exported for tests): keep only hits at/above the floor.
+function filterByFloor(results, floor = MIN_SIMILARITY) {
+    return results.filter(r => typeof r.similarity === 'number' && r.similarity >= floor);
+}
+
 class MemoryManager {
     constructor() {
         try {
@@ -26,6 +36,36 @@ class MemoryManager {
         // Always strictly route embeddings through Ollama
         this.ollamaUrl = 'http://127.0.0.1:11434/api';
         this.gpuVendor = 'GENERIC';
+        // Fallback embeddings endpoint (the configured OpenAI-compatible LLM server),
+        // used when Ollama is unreachable — common for LM-Studio-only setups.
+        this.llmEmbeddingBase = null;
+        this.embeddingModel = 'text-embedding-ada-002';
+    }
+
+    setLlmBase(url) {
+        this.llmEmbeddingBase = url || null;
+    }
+
+    // OpenAI-compatible /v1/embeddings fallback. Returns the vector or null.
+    async openAiEmbed(text) {
+        if (!this.llmEmbeddingBase) return null;
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 15000);
+            const base = String(this.llmEmbeddingBase).replace(/\/+$/, '').replace(/\/(v1|api)$/, '');
+            const resp = await fetch(`${base}/v1/embeddings`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer lm-studio' },
+                body: JSON.stringify({ input: text, model: this.embeddingModel }),
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            if (!resp.ok) return null;
+            const data = await resp.json();
+            return data.data?.[0]?.embedding || null;
+        } catch (e) {
+            return null;
+        }
     }
 
     setGpuVendor(vendor) {
@@ -99,7 +139,10 @@ class MemoryManager {
             }
         };
 
-        return await performEmbed();
+        const ollamaResult = await performEmbed();
+        if (ollamaResult) return ollamaResult;
+        // Ollama unreachable/failed → try the configured LLM's /v1/embeddings.
+        return await this.openAiEmbed(text);
     }
 
     async pullModel(model) {
@@ -167,8 +210,14 @@ class MemoryManager {
         }));
 
         results.sort((a, b) => b.similarity - a.similarity);
-        return { success: true, data: results.slice(0, limit).map(r => ({ text: r.text, metadata: r.metadata, similarity: r.similarity })) };
+        // Apply the relevance floor BEFORE the top-K cut so we never pad the result
+        // with weak matches just to reach `limit`.
+        const relevant = filterByFloor(results);
+        return { success: true, data: relevant.slice(0, limit).map(r => ({ text: r.text, metadata: r.metadata, similarity: r.similarity })) };
     }
 }
 
-module.exports = new MemoryManager();
+const instance = new MemoryManager();
+instance.filterByFloor = filterByFloor;
+instance.MIN_SIMILARITY = MIN_SIMILARITY;
+module.exports = instance;

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const os = require('os');
 const { spawn, exec, execSync } = require('child_process');
@@ -334,13 +334,12 @@ ipcMain.handle('load-history', async () => {
             }
 
             if (bestLegacyFile) {
-                console.log(`Migrating history from ${bestLegacyFile} to v37_9_1...`);
-                const data = await fsPromises.readFile(bestLegacyFile, 'utf-8');
-                const history = JSON.parse(data);
-                await fsPromises.writeFile(historyFile, JSON.stringify(history), 'utf-8');
-                return history;
-            }
-        }
+            console.log(`Migrating history from ${bestLegacyFile} to v40.7...`);
+            const data = await fsPromises.readFile(bestLegacyFile, 'utf-8');
+             const history = JSON.parse(data);
+             await fsPromises.writeFile(historyFile, JSON.stringify(history), 'utf-8');
+             return history;
+            }        }
     } catch (e) {
         console.error('Failed to load history', e);
     }
@@ -410,20 +409,63 @@ ipcMain.handle('import-session', async () => {
     }
 });
 
+ipcMain.handle('select-directory', async () => {
+    const result = await dialog.showOpenDialog({
+        title: 'Select Workspace Directory',
+        properties: ['openDirectory']
+    });
+    if (!result.canceled && result.filePaths.length > 0) {
+        return { path: result.filePaths[0] };
+    }
+    return null;
+});
+
 // Agent Harness IPC Handlers
+const projectContext = require('./projectContext.js');
+const ChangeLedger = require('./changeLedger.js');
+const EditEngine = require('./editEngine.js');
+const PlanStore = require('./planStore.js');
+
+const changeLedger = new ChangeLedger(userDataPath);
+const planStore = new PlanStore(userDataPath, projectContext);
+const editEngine = new EditEngine(changeLedger, projectContext);
+
 const activeProcesses = new Map();
 let nextJobId = 1;
+let currentPlanId = null;
 
-ipcMain.handle('agent-run-command', async (event, command, isBackground) => {
+function relPathFromRoot(absPath) {
+    const root = projectContext.getRoot();
+    return path.relative(root, absPath).replace(/\\/g, '/');
+}
+
+function spawnShell(command, cwd, isBackground) {
+    const cfg = projectContext.getShellConfig();
+    if (projectContext.isWindows()) {
+        const args = [cfg.flag, cfg.commandFlag, command];
+        return spawn(cfg.shell, args, { cwd, shell: false });
+    }
+    if (isBackground) {
+        return spawn(cfg.shell, [cfg.flag, command], { cwd });
+    }
+    return null;
+}
+
+ipcMain.handle('agent-run-command', async (event, command, isBackground, planId) => {
+    const pid = planId || currentPlanId;
+    const cwd = projectContext.getRoot();
+
     if (isBackground) {
         const jobId = nextJobId++;
-        const child = spawn('bash', ['-c', command], { cwd: process.env.HOME || process.cwd() });
-        const procInfo = { process: child, log: [] };
+        const child = spawnShell(command, cwd, true);
+        if (!child) {
+            return { error: 'Failed to spawn background process' };
+        }
+        const procInfo = { process: child, log: [], command, exitCode: null, running: true, startedAt: Date.now() };
         activeProcesses.set(jobId, procInfo);
 
         const appendLog = (data) => {
             const text = data.toString();
-            // Split by newline but drop empty trailing strings
             const lines = text.split('\n');
             if (lines[lines.length - 1] === '') lines.pop();
             procInfo.log.push(...lines);
@@ -432,26 +474,71 @@ ipcMain.handle('agent-run-command', async (event, command, isBackground) => {
 
         child.stdout.on('data', appendLog);
         child.stderr.on('data', appendLog);
-        
         child.on('close', (code) => {
             procInfo.log.push(`[Process exited with code ${code}]`);
+            procInfo.exitCode = code;
+            procInfo.running = false;
         });
 
-        return { stdout: `Process started in background. Job ID: ${jobId}. Use read_process_log to check status.` };
+        return { stdout: `Process started in background. Job ID: ${jobId}. Use read_process_log to check status, stop_process to kill it.` };
     }
 
     return new Promise((resolve) => {
-        exec(command, { cwd: process.env.HOME || process.cwd(), maxBuffer: 1024 * 1024 * 50 }, (error, stdout, stderr) => {
-            resolve({ error: error ? error.message : null, stdout, stderr });
-        });
+        // Foreground timeout so a command the model forgot to background (e.g. a dev
+        // server) fails fast instead of hanging the whole turn. Long builds should use
+        // is_background:true.
+        const FG_TIMEOUT_MS = 300000;
+        const onDone = (error, stdout, stderr) => {
+            if (error && error.killed) {
+                resolve({ error: `Command timed out after ${FG_TIMEOUT_MS / 1000}s and was killed. For long-running tasks (servers, watchers), call run_shell_command with is_background:true.`, stdout, stderr });
+            } else {
+                resolve({ error: error ? error.message : null, stdout, stderr });
+            }
+        };
+        const execOpts = { cwd, maxBuffer: 1024 * 1024 * 50, timeout: FG_TIMEOUT_MS, killSignal: 'SIGKILL' };
+        if (projectContext.isWindows()) {
+            exec(`powershell.exe -NoProfile -Command ${JSON.stringify(command)}`, execOpts, onDone);
+        } else {
+            exec(command, execOpts, onDone);
+        }
     });
+});
+
+ipcMain.handle('agent-stop-process', async (event, jobId) => {
+    const procInfo = activeProcesses.get(parseInt(jobId, 10));
+    if (!procInfo) return { error: `No active job found with ID: ${jobId}` };
+    try {
+        procInfo.process.kill('SIGKILL');
+        procInfo.running = false;
+        return { success: true, stdout: `Job ${jobId} killed.` };
+    } catch (e) {
+        return { error: e.message };
+    }
+});
+
+ipcMain.handle('agent-list-processes', async () => {
+    const jobs = [];
+    for (const [jobId, info] of activeProcesses) {
+        jobs.push({
+            jobId,
+            running: info.running !== false && info.exitCode === null,
+            exitCode: info.exitCode,
+            command: info.command || '',
+            lastLine: info.log.length ? info.log[info.log.length - 1] : ''
+        });
+    }
+    return { jobs };
 });
 
 ipcMain.handle('agent-read-process-log', async (event, jobId, lines = 50) => {
     const procInfo = activeProcesses.get(parseInt(jobId, 10));
     if (!procInfo) return { error: `No active job found with ID: ${jobId}` };
     const logSlice = procInfo.log.slice(-lines).join('\n');
-    return { log: logSlice || "(No output yet)" };
+    return {
+        log: logSlice || "(No output yet)",
+        running: procInfo.running !== false && procInfo.exitCode === null,
+        exitCode: procInfo.exitCode
+    };
 });
 
 ipcMain.handle('agent-send-input', async (event, jobId, input) => {
@@ -466,42 +553,64 @@ ipcMain.handle('agent-send-input', async (event, jobId, input) => {
     }
 });
 
-function expandTilde(filepath) {
-    if (filepath.startsWith('~/')) {
-        return path.join(os.homedir(), filepath.slice(2));
-    }
-    return filepath;
-}
-
-ipcMain.handle('agent-read-file', async (event, filepath) => {
+ipcMain.handle('agent-read-file', async (event, filepath, startLine, endLine) => {
     try {
-        const expandedPath = expandTilde(filepath);
-        const content = await fsPromises.readFile(expandedPath, 'utf-8');
+        const resolved = projectContext.resolvePath(filepath, { allowOutsideBeforeRoot: !projectContext.getRootOrNull() });
+        if (resolved.error) return { error: resolved.error };
+        projectContext.establishFromFilePath(resolved.path);
+        let content = await fsPromises.readFile(resolved.path, 'utf-8');
+        if (startLine != null || endLine != null) {
+            const lines = content.split('\n');
+            const start = Math.max(1, parseInt(startLine, 10) || 1) - 1;
+            const end = endLine != null ? Math.min(lines.length, parseInt(endLine, 10)) : lines.length;
+            content = lines.slice(start, end).join('\n');
+            return { content, lineRange: [start + 1, end] };
+        }
         return { content };
     } catch (error) {
         return { error: error.message };
     }
 });
 
-ipcMain.handle('agent-write-file', async (event, filepath, content) => {
+ipcMain.handle('agent-write-file', async (event, filepath, content, planId) => {
     try {
-        const expandedPath = expandTilde(filepath);
-        await fsPromises.writeFile(expandedPath, content, 'utf-8');
-        return { success: true };
+        const pid = planId || currentPlanId;
+        const sizeCheck = editEngine.validateWriteSize(content);
+        if (sizeCheck.error) return sizeCheck;
+
+        const resolved = projectContext.resolvePath(filepath, { allowOutsideBeforeRoot: !projectContext.getRootOrNull() });
+        if (resolved.error) return { error: resolved.error };
+
+        const absPath = resolved.path;
+        const existed = fs.existsSync(absPath);
+        if (pid) {
+            if (existed) await changeLedger.snapshotBefore(pid, absPath, 'write');
+            else await changeLedger.recordCreate(pid, absPath);
+        }
+        await fsPromises.mkdir(path.dirname(absPath), { recursive: true });
+        await fsPromises.writeFile(absPath, content, 'utf-8');
+        projectContext.establishFromFilePath(absPath);
+        invalidateRepoMap(); // the tree/symbols changed — drop the cached repo map
+        return { success: true, path: relPathFromRoot(absPath), created: !existed };
     } catch (error) {
         return { error: error.message };
     }
 });
 
-ipcMain.handle('agent-delete-file', async (event, filepath) => {
+ipcMain.handle('agent-delete-file', async (event, filepath, planId) => {
     try {
-        const expandedPath = expandTilde(filepath);
-        const stats = await fsPromises.stat(expandedPath);
+        const pid = planId || currentPlanId;
+        const resolved = projectContext.resolvePath(filepath);
+        if (resolved.error) return { error: resolved.error };
+        const absPath = resolved.path;
+        if (pid) await changeLedger.snapshotBefore(pid, absPath, 'delete');
+        const stats = await fsPromises.stat(absPath);
         if (stats.isDirectory()) {
-            await fsPromises.rm(expandedPath, { recursive: true, force: true });
+            await fsPromises.rm(absPath, { recursive: true, force: true });
         } else {
-            await fsPromises.unlink(expandedPath);
+            await fsPromises.unlink(absPath);
         }
+        invalidateRepoMap();
         return { success: true };
     } catch (error) {
         return { error: error.message };
@@ -510,13 +619,262 @@ ipcMain.handle('agent-delete-file', async (event, filepath) => {
 
 ipcMain.handle('agent-list-directory', async (event, dirpath) => {
     try {
-        const expandedPath = expandTilde(dirpath);
-        const files = await fsPromises.readdir(expandedPath, { withFileTypes: true });
+        const target = dirpath || '.';
+        const resolved = projectContext.resolvePath(target, { allowOutsideBeforeRoot: !projectContext.getRootOrNull() });
+        if (resolved.error) return { error: resolved.error };
+        const files = await fsPromises.readdir(resolved.path, { withFileTypes: true });
         const list = files.map(f => `${f.isDirectory() ? '[DIR] ' : '[FILE]'} ${f.name}`);
         return { files: list.join('\n') };
     } catch (error) {
         return { error: error.message };
     }
+});
+
+ipcMain.handle('agent-list-project', async () => {
+    try {
+        const listing = await projectContext.listProjectTree(2);
+        return { listing, projectRoot: projectContext.getRoot() };
+    } catch (e) {
+        return { error: e.message };
+    }
+});
+
+ipcMain.handle('edit-apply', async (event, { planId, filepath, find, replace }) => {
+    const pid = planId || currentPlanId;
+    if (!pid) return { error: 'No active plan for edit' };
+    const result = await editEngine.apply(pid, filepath, find, replace);
+    if (result.success) {
+        invalidateRepoMap();
+        result.relPath = relPathFromRoot(result.path);
+        if (planStore) {
+            try {
+                const plan = await planStore.load(pid);
+                if (!plan.error) {
+                    planStore.recordFileTouch(plan, result.relPath, 'edit');
+                    if (plan.projectRoot !== projectContext.getRootOrNull()) {
+                        plan.projectRoot = projectContext.getRootOrNull();
+                    }
+                    await planStore.save(plan);
+                }
+            } catch (e) { /* non-fatal */ }
+        }
+    }
+    return result;
+});
+
+ipcMain.handle('project-get-root', async () => ({ projectRoot: projectContext.getRootOrNull() || projectContext.getRoot() }));
+
+ipcMain.handle('project-set-root', async (event, rootPath) => {
+    const result = projectContext.setRoot(rootPath);
+    return result;
+});
+
+ipcMain.handle('project-resolve-path', async (event, inputPath) => projectContext.resolvePath(inputPath));
+
+ipcMain.handle('plan-load', async (event, planId) => {
+    const plan = await planStore.load(planId);
+    if (!plan.error) currentPlanId = plan.id;
+    return plan;
+});
+
+ipcMain.handle('plan-save', async (event, plan) => {
+    if (plan.projectRoot) projectContext.setRoot(plan.projectRoot);
+    currentPlanId = plan.id;
+    return await planStore.save(plan);
+});
+
+ipcMain.handle('plan-list-active', async () => planStore.listActive());
+
+ipcMain.handle('plan-approve', async (event, planId) => {
+    const plan = await planStore.load(planId);
+    if (plan.error) return plan;
+    planStore.approve(plan);
+    await planStore.save(plan);
+    return { success: true, plan };
+});
+
+ipcMain.handle('plan-add-steps', async (event, { planId, steps }) => {
+    const plan = await planStore.load(planId || currentPlanId);
+    if (plan.error) return plan;
+    const added = planStore.addSteps(plan, steps || []);
+    await planStore.save(plan);
+    return { success: true, plan, added: added.map(s => ({ id: s.id, title: s.title })) };
+});
+
+ipcMain.handle('agent-fetch-url', async (event, url) => {
+    const u = netGuard.validatePublicFetchTarget(url);
+    if (!u) return { error: 'URL rejected (must be http(s) to a non-internal host).' };
+    try {
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), 20000);
+        const resp = await fetch(u.toString(), { signal: controller.signal, redirect: 'follow', headers: { 'User-Agent': 'XkaliberAgent/1.0' } });
+        clearTimeout(t);
+        if (!resp.ok) return { error: `HTTP ${resp.status}`, status: resp.status };
+        const ctype = resp.headers.get('content-type') || '';
+        let body = await resp.text();
+        if (/html/i.test(ctype) || /^\s*</.test(body)) {
+            body = body
+                .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+                .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+                .replace(/<\/(p|div|h[1-6]|li|tr|br|section|article)>/gi, '\n')
+                .replace(/<[^>]+>/g, ' ')
+                .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<')
+                .replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+                .replace(/[ \t]+/g, ' ')
+                .replace(/\n\s*\n\s*\n+/g, '\n\n')
+                .trim();
+        }
+        const MAX = 8000;
+        const truncated = body.length > MAX;
+        return { content: truncated ? body.slice(0, MAX) + '\n...[truncated — fetch a more specific URL for the rest]' : body, url: u.toString(), status: resp.status, truncated };
+    } catch (e) {
+        return { error: (e && e.name === 'AbortError') ? 'Fetch timed out (20s).' : (e.message || String(e)) };
+    }
+});
+
+ipcMain.handle('ledger-diff', async (event, planId) => changeLedger.diff(planId || currentPlanId));
+
+ipcMain.handle('ledger-revert-all', async (event, planId) => changeLedger.revertAll(planId || currentPlanId));
+
+const { grepProject, hasRipgrep } = require('./lib/grepTool.js');
+const { globFiles } = require('./lib/globTool.js');
+const { buildRepoMap, invalidate: invalidateRepoMap } = require('./lib/repoMap.js');
+const activeFileSet = require('./lib/activeFileSet.js');
+const projectDetector = require('./lib/projectDetector.js');
+const verificationHarness = require('./lib/verificationHarness.js');
+const gitIntegration = require('./lib/gitIntegration.js');
+const { stepsForType } = require('./lib/planTemplates.js');
+
+ipcMain.handle('agent-grep', async (event, { pattern, path: subpath, glob, case_insensitive }) => {
+    try {
+        const root = projectContext.getRoot();
+        return await grepProject(root, pattern, { subpath, glob, caseInsensitive: case_insensitive });
+    } catch (e) {
+        return { error: e.message, hits: [] };
+    }
+});
+
+ipcMain.handle('agent-glob', async (event, { pattern, path: subpath }) => {
+    try {
+        const root = projectContext.getRoot();
+        return await globFiles(root, pattern || '**/*', { subpath });
+    } catch (e) {
+        return { error: e.message, files: [] };
+    }
+});
+
+ipcMain.handle('agent-get-repo-map', async (event, { boostTerms, maxTokens }) => {
+    try {
+        const root = projectContext.getRoot();
+        const map = buildRepoMap(root, { boostTerms: boostTerms || [], maxTokens: maxTokens || 1500 });
+        return { map, projectRoot: root };
+    } catch (e) {
+        return { error: e.message, map: '' };
+    }
+});
+
+ipcMain.handle('agent-verify', async (event, planId, opts = {}) => {
+    const pid = planId || currentPlanId;
+    if (!pid) return { error: 'No active plan' };
+    const plan = await planStore.load(pid);
+    if (plan.error) return plan;
+    const root = plan.projectRoot || projectContext.getRoot();
+    // Forward per-call options (e.g. { syntaxOnly:true } for intermediate steps) so
+    // mid-build steps run only the cheap syntax check instead of the full test suite
+    // against half-finished code — otherwise every intermediate mark_step_done fails.
+    const result = await verificationHarness.runVerification(root, plan, opts || {});
+    // Only stamp [verified] when a real check actually passed — never when the result
+    // was merely "unverified" (nothing could be checked). This stops the false-green.
+    if (result.ok && !result.unverified && plan.currentStepId) {
+        verificationHarness.markStepVerified(plan, plan.currentStepId);
+        await planStore.save(plan);
+    }
+    return { ...result, plan };
+});
+
+ipcMain.handle('agent-doctor', async () => ({
+    hasRipgrep: hasRipgrep(),
+    projectRoot: projectContext.getRootOrNull(),
+    planId: currentPlanId
+}));
+
+ipcMain.handle('edit-apply-patch', async (event, { planId, filepath, patch }) => {
+    const pid = planId || currentPlanId;
+    if (!pid) return { error: 'No active plan' };
+    const result = await editEngine.applyPatch(pid, filepath, patch);
+    if (result.success) {
+        invalidateRepoMap();
+        result.relPath = relPathFromRoot(result.path);
+        const plan = await planStore.load(pid);
+        if (!plan.error) {
+            planStore.recordFileTouch(plan, result.relPath, 'edit');
+            await planStore.save(plan);
+        }
+    }
+    return result;
+});
+
+ipcMain.handle('edit-apply-batch', async (event, { planId, edits }) => {
+    const pid = planId || currentPlanId;
+    if (!pid) return { error: 'No active plan' };
+    const res = await editEngine.applyBatch(pid, edits || []);
+    invalidateRepoMap();
+    // Attach project-relative paths and record file touches on the plan, mirroring
+    // the single-edit 'edit-apply' handler so batch edits are tracked (and revertable).
+    if (res.results) {
+        let plan = null;
+        try { const p = await planStore.load(pid); if (!p.error) plan = p; } catch (e) { plan = null; }
+        for (const r of res.results) {
+            if (r.result?.success && r.result.path) {
+                r.result.relPath = relPathFromRoot(r.result.path);
+                if (plan) planStore.recordFileTouch(plan, r.result.relPath, 'edit');
+            }
+        }
+        if (plan) { try { await planStore.save(plan); } catch (e) { /* non-fatal */ } }
+    }
+    return res;
+});
+
+ipcMain.handle('git-init', async (event, planId) => {
+    const root = projectContext.getRoot();
+    return gitIntegration.init(root);
+});
+
+ipcMain.handle('git-status', async () => gitIntegration.status(projectContext.getRoot()));
+
+ipcMain.handle('git-diff', async () => gitIntegration.diff(projectContext.getRoot()));
+
+ipcMain.handle('git-commit', async (event, { message, planId }) => {
+    const root = projectContext.getRoot();
+    return gitIntegration.commit(root, message || 'Xkaliber agent checkpoint');
+});
+
+ipcMain.handle('git-undo', async () => gitIntegration.undoLast(projectContext.getRoot()));
+
+ipcMain.handle('git-log', async (event, n) => gitIntegration.logOneline(projectContext.getRoot(), n || 10));
+
+ipcMain.handle('plan-detect', async () => {
+    const root = projectContext.getRootOrNull() || projectContext.getRoot();
+    return projectDetector.detect(root);
+});
+
+ipcMain.handle('plan-create', async (event, { goal, steps, userText, projectType }) => {
+    let stepList = steps;
+    if (projectType === 'greenfield' && (!stepList || !stepList.length)) {
+        const det = projectDetector.detect(projectContext.getRootOrNull() || process.cwd());
+        stepList = stepsForType('greenfield', det.language) || stepsForType('greenfield', 'node');
+    }
+    const plan = planStore.createEmptyPlan(goal, stepList, userText);
+    if (projectType) plan.projectType = projectType;
+    const root = plan.projectRoot || projectContext.getRootOrNull();
+    if (root) {
+        planStore.applyDetector(plan, projectDetector.detect(root));
+    }
+    activeFileSet.addFiles(plan, activeFileSet.parseMentionsFromText(userText || goal, root), root);
+    currentPlanId = plan.id;
+    projectContext.setPlanId(plan.id);
+    await planStore.save(plan);
+    return { success: true, plan };
 });
 
 let mainWindow;
@@ -975,6 +1333,100 @@ const WEB_PORT = 3000;
 
 // Host state for LM Studio proxying
 let lmsHostUrl = 'http://127.0.0.1:1234';
+// Let vector memory fall back to this server's /v1/embeddings when Ollama is absent.
+try { memoryManager.setLlmBase(lmsHostUrl); } catch (e) { /* optional */ }
+
+// --- SSRF / download hardening (pure logic in lib/netGuard.js) ---------------
+const netGuard = require('./lib/netGuard.js');
+const { isBlockedHost } = netGuard;
+
+// Permit a proxy target only if it's loopback or the configured LLM server.
+function validateProxyTarget(targetUrl) {
+    return netGuard.validateProxyTarget(targetUrl, lmsHostUrl);
+}
+
+// Permit a download only for real files inside the project root / app data / downloads.
+function validateDownloadPath(rawPath) {
+    const roots = [];
+    const projRoot = projectContext.getRootOrNull();
+    if (projRoot) roots.push(projRoot);
+    try { roots.push(app.getPath('userData')); } catch (e) {}
+    try { roots.push(app.getPath('downloads')); } catch (e) {}
+    return netGuard.validateDownloadPath(rawPath, roots);
+}
+
+// --- Plugin system (lib/pluginManager.js + pluginInstaller.js) ---------------
+const PluginManager = require('./lib/pluginManager.js');
+const PluginInstaller = require('./lib/pluginInstaller.js');
+
+// Core agent tool names plugins may not shadow (kept in sync with PLAN_TOOLS).
+const CORE_TOOL_NAMES = [
+    'submit_plan', 'mark_step_done', 'mark_step_blocked', 'run_shell_command',
+    'run_command', 'read_file', 'write_file', 'edit_file', 'list_directory',
+    'list_project', 'delete_file', 'set_project_root', 'memory_search',
+    'save_new_user_fact_only', 'read_process_log', 'send_input',
+    'provide_file_download_link', 'web_search', 'send_whatsapp_message',
+    'dynamic_schema_generate', 'grep_project', 'glob_files', 'get_repo_map',
+    'apply_patch', 'apply_edits', 'add_files', 'drop_files', 'run_verify',
+    'record_decision', 'init_project'
+];
+
+// Foreground command runner for a plugin's `shell` capability (project-root cwd).
+function runCommandForPlugin(command) {
+    return new Promise((resolve) => {
+        const cwd = projectContext.getRoot();
+        if (projectContext.isWindows()) {
+            exec(`powershell.exe -NoProfile -Command ${JSON.stringify(command)}`, { cwd, maxBuffer: 1024 * 1024 * 50 }, (error, stdout, stderr) => {
+                resolve({ error: error ? error.message : null, stdout, stderr });
+            });
+        } else {
+            exec(command, { cwd, maxBuffer: 1024 * 1024 * 50 }, (error, stdout, stderr) => {
+                resolve({ error: error ? error.message : null, stdout, stderr });
+            });
+        }
+    });
+}
+
+const pluginManager = new PluginManager(userDataPath, {
+    projectContext,
+    runCommand: runCommandForPlugin,
+    memory: {
+        store: (text, metadata) => memoryManager.storeVector(text, metadata),
+        query: (query, limit) => memoryManager.queryVectors(query, limit),
+    },
+    uiNotify: (pluginId, msg) => {
+        if (mainWindow) mainWindow.webContents.send('plugin-ui-event', { pluginId, message: msg });
+    },
+    netGuard,
+    coreToolNames: CORE_TOOL_NAMES,
+});
+try { pluginManager.discover(); } catch (e) { console.error('[plugins] discover failed:', e); }
+
+const pluginInstaller = new PluginInstaller(pluginManager.pluginsDir, { netGuard });
+
+ipcMain.handle('plugins-list', async () => pluginManager.list());
+ipcMain.handle('plugins-get-contributions', async () => ({
+    tools: pluginManager.getEnabledToolSchemas(),
+    commands: pluginManager.getEnabledCommands(),
+}));
+ipcMain.handle('plugin-invoke-tool', async (event, { tool, args }) => {
+    const result = await pluginManager.invokeTool(tool, args);
+    return { result };
+});
+ipcMain.handle('plugin-run-command', async (event, { name, argText }) => {
+    const text = await pluginManager.runCommandText(name, argText);
+    return { text };
+});
+ipcMain.handle('plugin-fire-hook', async (event, { hookEvent, payload }) =>
+    pluginManager.fireHook(hookEvent, payload || {}));
+ipcMain.handle('plugin-set-enabled', async (event, { id, enabled, grantedCaps }) =>
+    pluginManager.setEnabled(id, enabled, grantedCaps));
+ipcMain.handle('plugin-uninstall', async (event, { id }) => pluginManager.uninstall(id));
+ipcMain.handle('plugin-install', async (event, { url }) => {
+    const res = await pluginInstaller.install(url);
+    if (res.success) pluginManager.discover(); // pick up the freshly installed folder
+    return res;
+});
 
 function getLocalIP() {
     const interfaces = os.networkInterfaces();
@@ -1034,8 +1486,12 @@ const webServer = http.createServer((req, res) => {
         if (!targetUrl) {
             res.writeHead(400); return res.end('Missing x-target-url header');
         }
+        const parsed = validateProxyTarget(targetUrl);
+        if (!parsed) {
+            res.writeHead(403, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+            return res.end(JSON.stringify({ error: 'Proxy target not allowed. Only the configured local LLM server may be proxied.' }));
+        }
         try {
-            const parsed = new URL(targetUrl);
             const transport = parsed.protocol === 'https:' ? require('https') : require('http');
             const options = {
                 hostname: parsed.hostname,
@@ -1044,11 +1500,14 @@ const webServer = http.createServer((req, res) => {
                 method: req.method,
                 headers: { ...req.headers, host: parsed.host }
             };
-            
+
             delete options.headers['origin'];
             delete options.headers['referer'];
             delete options.headers['x-target-url'];
-            delete options.headers['accept-encoding']; 
+            delete options.headers['accept-encoding'];
+            // Don't leak the app's session token / cookies to the proxied target.
+            delete options.headers['authorization'];
+            delete options.headers['cookie'];
             
             const proxyReq = transport.request(options, (proxyRes) => {
                 // Merge target headers with our required CORS headers
@@ -1101,9 +1560,18 @@ const webServer = http.createServer((req, res) => {
                     return res.end(JSON.stringify({ error: 'Tool usage restricted by Administrator' }));
                 }
 
-                // Special trap to let host know LMS server changed from web UI
+                // Special trap to let host know LMS server changed from web UI.
+                // Validate it's a well-formed http(s) URL and not a metadata/link-local
+                // host before trusting it (it feeds the proxy allowlist).
                 if (channel === 'set-lms-url') {
-                    lmsHostUrl = args[0];
+                    let candidate;
+                    try { candidate = new URL(String(args[0])); } catch (e) { candidate = null; }
+                    if (!candidate || (candidate.protocol !== 'http:' && candidate.protocol !== 'https:') || isBlockedHost(candidate.hostname)) {
+                        res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                        return res.end(JSON.stringify({ error: 'Invalid LLM server URL' }));
+                    }
+                    lmsHostUrl = candidate.toString();
+                    try { memoryManager.setLlmBase(lmsHostUrl); } catch (e) { /* optional */ }
                     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
                     return res.end(JSON.stringify({ success: true }));
                 }
@@ -1125,27 +1593,45 @@ const webServer = http.createServer((req, res) => {
         return;
     }
 
-    // File Download Endpoint
+    // File Download Endpoint — only files inside the project root / app data may be
+    // served (previously any absolute path → arbitrary file read for authd users).
     if (url.startsWith('/download_remote')) {
         const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
         const fileToDownload = parsedUrl.searchParams.get('file');
-        if (fileToDownload && fs.existsSync(fileToDownload)) {
+        const safePath = validateDownloadPath(fileToDownload);
+        if (safePath) {
+            const safeName = path.basename(safePath).replace(/["\r\n]/g, '_');
             res.writeHead(200, {
-                'Content-Disposition': `attachment; filename="${path.basename(fileToDownload)}"`,
+                'Content-Disposition': `attachment; filename="${safeName}"`,
                 'Access-Control-Allow-Origin': '*'
             });
-            const readStream = fs.createReadStream(fileToDownload);
+            const readStream = fs.createReadStream(safePath);
+            readStream.on('error', () => { if (!res.headersSent) res.writeHead(404); res.end(); });
             readStream.pipe(res);
             return;
         } else {
-            res.writeHead(404, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
-            res.end('File not found');
+            res.writeHead(403, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+            res.end('File not found or not permitted');
             return;
         }
     }
 
     // Static File Serving
-    let filePath = path.join(__dirname, url === '/' ? 'index.html' : url);
+    // Decode and contain within __dirname to prevent path traversal
+    // (e.g. "/../../secret.js" — extensions like .js/.css bypass the auth gate above).
+    let decodedUrl;
+    try {
+        decodedUrl = decodeURIComponent(url);
+    } catch (e) {
+        decodedUrl = url;
+    }
+    const appDir = path.resolve(__dirname);
+    let filePath = path.resolve(appDir, '.' + (decodedUrl === '/' ? '/index.html' : decodedUrl));
+    const relToApp = path.relative(appDir, filePath);
+    if (relToApp.startsWith('..') || path.isAbsolute(relToApp)) {
+        res.writeHead(403, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+        return res.end('Forbidden');
+    }
     fs.promises.readFile(filePath)
         .then(content => {
             const ext = path.extname(filePath);
@@ -1237,11 +1723,17 @@ ipcMain.handle('open-external-url', async (event, url) => {
 });
 
 ipcMain.handle('get-env-info', async () => {
+    const selectedRoot = projectContext.getRootOrNull();
     return {
         platform: os.platform(),
         arch: os.arch(),
         homedir: os.homedir(),
         username: os.userInfo().username,
-        cwd: process.cwd()
+        // The agent must operate on the user-selected workspace, not the app's
+        // own install dir. Report the project root as cwd; expose both fields so
+        // callers can tell whether a workspace was actually chosen.
+        cwd: projectContext.getRoot(),
+        projectRoot: selectedRoot,
+        appDir: process.cwd()
     };
 });

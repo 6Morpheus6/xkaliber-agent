@@ -1,12 +1,107 @@
-# Xkaliber Agent v39.4.0 // Pure LM Studio UI & Persistent Memory
+# Xkaliber Agent v41.9.0 // Full-Project Local Coding Agent
 
-Xkaliber Agent is a modern, dark-themed autonomous agent desktop client built with Electron. It connects seamlessly to local **LM Studio** and OpenAI-compatible neural models while utilizing **Ollama** for high-performance persistent vector memory.
+Xkaliber Agent is a modern, dark-themed autonomous agent desktop client built with Electron. It connects to local **LM Studio** (OpenAI-compatible) for chat and coding, and uses **Ollama** for vector memory embeddings.
 
-### 🚀 NEW in v39.4.0: CLI Removal & Cleanup
-- **xagent-cli Removed**: The standalone `xagent-cli` script and its associated dependencies have been entirely removed to decouple it from the main UI application. Xkaliber Agent is now solely an Electron-based application.
+## v41.9.0 highlights — Plugin System
+
+A **plugin system on the level of leading coding agents'**: third-party folders that extend the agent with **tools**, **slash commands**, and **lifecycle hooks** — without editing core files. Authoring guide in `docs/PLUGINS.md`; full design in `docs/superpowers/specs/2026-06-04-plugin-system-design.md`.
+
+- **Full bundle format**: a plugin is a folder with a `plugin.json` manifest plus `tools/`, `commands/`, `hooks/` subfolders (one contribution per file, auto-discovered). Try `examples/plugins/hello`.
+- **Trusted local code, installed from Git/URL**: paste `github.com/user/repo` (or any git/archive URL) in the sidebar 🧩 PLUGINS panel; the installer block-checks the host via `netGuard`, then `git clone`s (or downloads a GitHub tarball + extracts with system `tar`).
+- **Declared capabilities + consent**: a manifest declares the host capabilities it needs (`fs`, `shell`, `net`, `memory`, `ui`, `log`); enabling a plugin shows them and asks you to confirm. The `host` only exposes granted caps. *(Honest boundary: plugins are trusted code — capabilities are transparency + defence-in-depth for honest plugins, not a sandbox against hostile code.)*
+- **Tools, commands, hooks**: enabled plugin tools merge into the Build-Mode execution tool surface (routed through one generic IPC channel; collisions with core tools are rejected). `/command args` expands a plugin command. Hooks fire on `beforeToolCall` / `afterToolCall` / `onPlanApproved` / `onPlanDone` / `onMessageSend`, and a `beforeToolCall` hook can veto a tool call.
+- **Robust**: a broken plugin (bad manifest or throwing module) is quarantined and flagged in the UI — it never breaks startup or the agent loop. New engines are unit-tested (`tests/pluginSystem.test.js`); the suite is now 43 tests.
+
+See `CHANGELOG.md` for the full v41.9.0 entry.
+
+## v41.3.0 highlights — Build Mode reliability + pro-level coding
+
+This release is an engine-only pass on Build Mode (the durable coding agent). **No UI/markup changes** — the sidebar and mobile remote view are untouched; every fix is in the logic. A regression suite (`tests/agent-loop.test.js`) now covers the plan state machine end-to-end (27 tests total).
+
+- **Steps actually advance**: `run_verify` no longer wipes the per-step activity counter, so a read-only / verify step can complete instead of getting stuck behind the "you haven't done any work" guard rail.
+- **Multi-step builds finish**: the execution turn budget now scales to the plan size instead of being capped by the 20-step chat slider, so larger plans don't silently freeze on the current step. If the budget is exhausted, the agent says so and the plan stays resumable.
+- **Edits are tracked and reliable**: batch `apply_edits` now records the files it changes (so they stay in context); whitespace-tolerant search/replace refuses ambiguous matches; unified-diff patches use hunk line numbers to hit the intended occurrence of a repeated line.
+- **A real correctness gate**: with no test/lint command configured, verification now syntax-checks the files the step touched, so a step can't complete with broken code.
+- **Editing isn't blind**: files the agent is editing are shown in full when they fit the context budget (no more head/tail truncation of the file being changed), and failing test output keeps its tail so the error survives.
+- **Safer UX**: the BUILD MODE toggle is locked while a task runs (so you can't hide the approve/revert controls mid-task); resuming an unapproved plan now runs the approval gate; a missing plan engine is reported instead of silently falling back to chat; and BUILD MODE is mutually exclusive with the Netrunner / Offline-Browser / Agent toggles.
+- **Per-step git checkpoints**: a commit is made after each completed step, so progress is recoverable mid-build.
+
+See `CHANGELOG.md` for the full v41.3.0 entry.
+
+## v41.2.1 highlights — Text Loop Prevention & Code Enforcement
+
+This release resolves stability issues and implements strict execution guards.
+
+This release introduces major workflow improvements, enabling the user to interact with the agent mid-task without aborting execution.
+
+- **Unlocked Input**: The chat input field and send button are no longer disabled when the agent is executing a plan or waiting for approval.
+- **Live User Hints**: Submitting text while the agent is busy running a task will now inject your message as a `User Hint` into the context, allowing you to seamlessly guide the agent or answer questions it asks mid-flight without breaking its loop.
+- **Improved Interruptions**: You can now choose whether to let a task continue with your injected hint or use the stop button for hard aborts.
+- **Small-model tool calling**: models that emit tool calls as text/JSON instead of OpenAI-native `tool_calls` (common with Gemma 3n E4B) no longer stall the loop — a tolerant fallback recovers calls from `<tool_call>` tags, fenced ```json blocks, and `arguments`/`parameters` shapes (only real tool names are accepted, so prose can't misfire).
+- **Explore-then-plan**: the planning phase is now iterative — the model can run discovery tools (grep/read/repo-map) before `submit_plan` instead of the task aborting.
+- **No mid-build cascade failures**: verification (lint/test) now hard-gates only the **final** step (or `verifyPolicy: 'strict'`); intermediate steps that are legitimately red are recorded as warnings, and the full suite is no longer re-run after every edit.
+- **`apply_patch` data-loss fix**: unified-diff application previously dropped every line before the first hunk, silently corrupting files — now fixed and regression-tested.
+- **Valid message arrays**: orphaned `role:'tool'` messages (which strict OpenAI servers reject with HTTP 400 on long tasks) are sanitized out.
+- **Security**: web-server path traversal closed; SSRF surface on `/api/proxy/*` constrained to loopback / the configured LLM origin (cloud-metadata always blocked, session token no longer forwarded); `/download_remote` confined to the project / app-data / downloads dirs. Pure logic in `lib/netGuard.js`, unit-tested.
+
+See `CHANGELOG.md` for the full v50.1.0 entry.
+
+## v50 highlights
+
+- **Discovery**: `grep_project`, `glob_files`, token-budgeted repo map, `.xkaliberignore`
+- **Edits v2**: search/replace, unified diff patches, batch apply, 64KB write cap for scaffolding
+- **Verification**: auto-detect test/lint commands; the lint/test gate applies to the **final** step (or every step under `verifyPolicy: 'strict'`), so multi-step builds aren't blocked by intermediate work that's legitimately red
+- **Git**: init, per-step commits, undo last agent commit from review panel
+- **Dual model**: separate **Planner** and **Editor** model selectors in Build Mode (local LM Studio only)
+- **CLI**: `node cli-build.js "goal" [root]` creates/approves a plan headless; `npm test` and `npm run ship-check` for smoke tests
+
+### Local model pairing (LM Studio)
+
+| Role | Suggested model | Context |
+|------|-----------------|--------|
+| Planner | Smaller instruct model (7B–14B) | 8k–16k for plan + repo map |
+| Editor | Stronger coder model (14B–32B) | 16k–32k for multi-file edits |
+
+Load both models in LM Studio, pick them in the Build sidebar, or set `localStorage` keys `xkaliber_planner_model` / `xkaliber_editor_model`.
+
+**Running a single small model (e.g. Gemma 3n E4B)?** Leave Planner and Editor on the same model — v50.1.0's text tool-call fallback, iterative planning, and relaxed verification gating are tuned so a single small model can plan and edit reliably. Give it as much context as your hardware allows (8k+ recommended) since the repo map and live file excerpts share that budget.
+
+## Operating modes
+
+| Mode | Toggle | Use for |
+|------|--------|---------|
+| **Chat** | Default (both off) | Hello, Q&A, casual conversation |
+| **Agent** | AGENT (SYS-ACCESS) | One-off tools: read/write files, shell, web search — no plan approval |
+| **Build** | BUILD MODE (CODING) | Multi-step projects: plan → approve → execute → review |
+
+**Build Mode** uses the durable memory system (plan on disk, not chat history). **Agent** does not trigger planning — say hello without a task manager asking for approval.
+
+### 🚀 NEW in v40.0.0: Durable Memory & Build Mode
+
+- **Plan as source of truth**: Multi-step coding tasks persist goal, steps, decisions, and file ledger to disk (`<userData>/plans/`). Context is rebuilt each turn from plan state + live files — the model no longer "forgets" mid-build.
+- **Build Mode toggle**: Separates coding workflows from general chat. Plan approval, step tracker, diff review, and context slider appear only in Build Mode.
+- **Change ledger**: Snapshots before every write/edit/delete; unified diff at end; **Revert All** restores pre-task file state.
+- **Edit engine**: Targeted `edit_file` (search/replace) with whitespace-tolerant matching; `write_file` capped for small/new files.
+- **Project sandbox**: File and shell ops scoped to an inferred project root; path traversal rejected; **PowerShell on Windows**, bash on Linux.
+- **Crash resume**: Plans autosave after every tool call; reopen the app to resume an interrupted build.
+- **Removed for build path**: Transcript pruning (`isDeepLoop`), Task Isolation flush, and RESOURCE SAVER toggle (obsolete once memory is durable).
+
+### Quick start (Build Mode)
+
+1. Start LM Studio with a model loaded at `http://localhost:1234`
+2. Run `npm install` && `npm start`
+3. Enable **BUILD MODE (CODING)** in the sidebar
+4. Describe a coding task → review plan → **APPROVE PLAN** → agent executes step-by-step
+5. On completion: review diff, optionally **REVERT ALL**
+
+Smoke-test core engines: `npm test` and `npm run ship-check`
+
+Headless plan bootstrap: `node cli-build.js "Add auth module" ./my-repo`
+
+Optional interactive CLI (Ollama): `node xagent-cli/index.js` — shares `tools.js` with the desktop app.
 
 ### 🚀 NEW in v39.3.0: Handled Context by LM Studio & UI Cleanup
-- **Context Slider Removal**: The manual context limit slider has been removed. Context management is now handled dynamically by LM Studio and the agent's internal resource guard.
+- **Context Slider Removal** *(restored in v40 for Build Mode)*: The manual context limit slider was removed from the general UI; v40 reintroduces it under Build Mode for plan-driven context budgeting.
 - **Robust Remote Downloads**: Fixed a UI crash related to binary file downloads by routing download links through Electron's native `shell` module instead of internal DOM navigation.
 - **Ollama UI Removal**: Ollama support has been entirely dropped from the primary user interface to streamline the user experience. The application now exclusively uses LM Studio/OpenAI compatible backends for inference.
 - **Forced Uplink Mode**: The application now defaults to LM Studio/OpenAI compatible mode for primary inference.
@@ -90,15 +185,25 @@ The agent can now natively execute, monitor, and interact with heavy system work
 ### 🌐 Cloudflare Remote Access (v35)
 Easily access your local Xkaliber Agent from anywhere.
 - **Automatic Tunnels**: The agent automatically downloads and configures cloudflared to generate a secure, ephemeral `.trycloudflare.com` URL on startup.
-- **Standalone Support**: Headless Linux/CLI users can run `node standalone-server.js` to instantly expose the web UI to the public internet securely without the Electron GUI.
+- **Standalone proxy**: Headless Linux/CLI users can run `node standalone-server.js` as a lightweight CORS proxy to a local LLM (it does **not** serve the app UI or include auth). As of v50.1.0 its proxy is restricted to loopback by default — set `XK_LLM_ORIGIN` to allow a specific remote LLM origin. Do not expose it directly to the public internet.
 
-### 🤖 Autonomous "Plan-Execute-Verify" Workflow (v34)
-The agent now supports a sophisticated multi-turn autonomous loop designed for complex system tasks and research.
-- **Contextual Tool-Chaining**: Instead of linear execution, the agent uses a `task_begin` tool to formally declare a high-level goal and a structured multi-step plan.
-- **Plan-Execute-Verify**: The agent executes steps sequentially, analyzes outputs, and automatically decides the next action. It finishes with a `task_complete` call to summarize results and verify the goal was achieved.
-- **Extended Reasoning**: Supports up to 20 autonomous turns per user message, providing the depth needed for multi-file audits, deep research, or complex troubleshooting.
-- **System Stability**: Built-in 1-second "cool-down" delays between turns prevent VRAM/CPU exhaustion and system lockups during long reasoning chains.
-- **Live Feedback**: The UI remains interactive and transparent, showing exactly which step the agent is on (`Thinking (Step X/20)...`) without clearing previous context.
+### 🤖 Build Mode: Plan-Execute-Review (v40)
+When **BUILD MODE** is enabled, the agent runs a disk-backed coding loop designed for long multi-file projects on small local models.
+- **Planning**: Model submits `submit_plan` with goal and ordered steps; you edit and approve in the sidebar.
+- **Execution**: One step at a time; harness updates step status from tool outcomes (never from model prose).
+- **Context**: `contextBuilder` rebuilds messages each turn — goal, decisions, current step, and live file excerpts always survive budget pressure.
+- **Review**: Unified diff from the change ledger; one-click revert.
+- **Resume**: Close the app mid-task and reopen — execution continues from the saved plan.
+
+**Agent mode** (without Build) keeps the conversational multi-turn loop with shell/file tools — suitable for quick tasks without formal planning.
+
+### 🧩 Plugin System (v42)
+Extend the agent with **tools**, **slash commands**, and **lifecycle hooks** shipped as trusted local folders — no core edits. Authoring guide: `docs/PLUGINS.md`.
+- **Bundle format**: `plugin.json` manifest + `tools/`, `commands/`, `hooks/` (one contribution per file; auto-discovered). Example: `examples/plugins/hello`.
+- **Install from Git/URL**: sidebar 🧩 PLUGINS → paste a repo/archive URL → INSTALL → enable (with capability consent). Manual: drop a folder in `<userData>/plugins/<id>/`.
+- **Capabilities**: a manifest declares `fs` / `shell` / `net` / `memory` / `ui` / `log`; the cap-gated `host` exposes only what you grant. *Plugins run trusted code — capabilities are transparency + defence-in-depth for honest plugins, not a sandbox.*
+- **Hooks**: `beforeToolCall` (can veto), `afterToolCall`, `onPlanApproved`, `onPlanDone`, `onMessageSend`. A broken plugin is quarantined and flagged, never breaking the agent.
+- **Engines**: `lib/pluginManager.js`, `lib/pluginHost.js`, `lib/pluginInstaller.js`; installs go through `lib/netGuard.js` (metadata/link-local/ULA always blocked).
 
 ### 🧠 Neuro-Core (Intelligent Persistent Memory)
 The agent features a robust long-term memory engine powered by local embeddings.
@@ -114,12 +219,21 @@ The agent features a robust long-term memory engine powered by local embeddings.
 - **Secure Sudo Injection**: A password field in the UI allows you to provide your sudo password. When the agent attempts a command requiring root privileges, the application dynamically intercepts and pipes your password.
 - **Guard Rails**: Strict system prompts prevent the agent from modifying files or configurations unprompted.
 
-### 🛠️ Autonomous Agent Tools
-The UI provides transparent execution logs (`⚡ Exec: function_name`). Available tools include:
-- `run_shell_command`
-- `read_file`, `write_file`, `list_directory`, `delete_file`
-- `save_new_user_fact_only`, `memory_search`
-- `web_search`
+### 🛠️ Agent & Build Tools
+The UI shows transparent execution logs (`⚡ tool_name`).
+
+**Build Mode tools** (`agentLoop.js`):
+- Plan: `submit_plan`, `mark_step_done`, `mark_step_blocked`, `record_decision`, `init_project`
+- Discovery: `grep_project`, `glob_files`, `get_repo_map`, `list_project`, `read_file` (optional line range)
+- Edit: `edit_file`, `apply_edits` (batch), `apply_patch` (unified diff), `write_file` (≤64KB), `delete_file`
+- Context: `add_files`, `drop_files` (pin/unpin files in the live context)
+- Exec/verify: `run_command`, `run_verify`, `set_project_root`, `read_process_log`
+- Memory/web: `search_memory`, `save_fact`, `web_search`
+
+**Agent mode tools** (chat loop):
+- `run_shell_command`, `read_file`, `write_file`, `list_directory`, `delete_file`
+- `save_new_user_fact_only`, `memory_search`, `web_search`
+- `read_process_log`, `send_input`, `provide_file_download_link`
 
 ### 🌐 Netrunner (Web Access)
 - Equips the agent with real-time web search capabilities using a secure DuckDuckGo HTML scraper (bypassing CORS and API key requirements).
@@ -136,13 +250,38 @@ The UI provides transparent execution logs (`⚡ Exec: function_name`). Availabl
 
 ### Prerequisites
 - Node.js (v18+)
-- Ollama running locally (`ollama serve`)
+- **LM Studio** (or any OpenAI-compatible server) for chat/coding — default `http://localhost:1234`
+- **Ollama** (optional) for vector memory embeddings (`all-minilm`)
 
 ### Setup
 ```bash
 # Install dependencies
 npm install
 
-# Start in development mode
+# Start the Electron app
 npm start
 ```
+
+### Architecture (Build Mode)
+
+| Module | Role |
+|--------|------|
+| `planStore.js` | Plan JSON CRUD + state machine |
+| `contextBuilder.js` | Rebuild model context from plan + files |
+| `changeLedger.js` | Snapshots, diff, revert-all |
+| `editEngine.js` | Tolerant search/replace edits |
+| `projectContext.js` | Project root, sandbox, cross-platform shell |
+| `agentLoop.js` | Plan → approve → execute → review |
+| `lib/pluginManager.js` | Plugin discovery/registry, enable + cap state, tool/command/hook routing |
+| `lib/pluginHost.js` | Capability-gated `host` facade for plugin code |
+| `lib/pluginInstaller.js` | Install plugins from Git/URL (netGuard-checked) |
+
+### Testing
+
+The durable engines and the agent loop are unit-testable in plain Node (no Electron). Run the suite:
+
+```bash
+npm test          # runs node --test "tests/*.test.js"
+```
+
+`tests/durable-modules.test.js` covers the ledger, edit engine, edit formats, repo map, net guard, and verification harness. `tests/agent-loop.test.js` covers the plan state machine: step advancement, the verify/guard-rail interaction, the turn budget, batch-edit tracking, context building, and the syntax-check verification fallback. `tests/pluginSystem.test.js` covers the plugin engines: discovery, manifest validation, quarantine of broken plugins, tool-name collisions, contribution-path traversal rejection, enable/cap persistence, the capability-gated host (fs sandbox, net guard, memory), and the installer (URL block-check, staging, GitHub-tarball resolution). Prefer these over the legacy `node test-durable-modules.js` smoke script, which does not assert step advancement.
