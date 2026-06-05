@@ -1,6 +1,8 @@
 # Xkaliber Agent v41.9.0 // Full-Project Local Coding Agent
 
 Xkaliber Agent is a modern, dark-themed autonomous agent desktop client built with Electron. It connects to local **LM Studio** (OpenAI-compatible) for chat and coding, and uses **Ollama** for vector memory embeddings.
+<img width="2560" height="1600" alt="ss" src="https://github.com/user-attachments/assets/e162ed1f-76b5-418a-b568-40dc2a7e9844" />
+
 
 ## v41.9.0 highlights — Plugin System
 
